@@ -110,16 +110,14 @@ public class PartyAvatarSideIndexHelper
     {
         try
         {
-            // 新的动态获取角色编号位置逻辑
-            return GetAllIndexRectsNew(imageRegion, multiGameStatus, logger, elementAssets, systemInfo);
+            // 只使用旧的写死位置逻辑
+            logger.LogInformation("使用写死位置逻辑获取角色编号位置");
+            return GetAllIndexRectsOld(imageRegion, multiGameStatus);
         }
         catch (Exception ex)
         {
-            logger.LogDebug(ex, "使用新方法获取角色编号位置失败");
-            logger.LogWarning("使用新方法获取角色编号位置失败，原因：" + ex.Message);
-            logger.LogWarning("尝试使用旧的写死位置逻辑");
-            // 旧的写死位置逻辑
-            return GetAllIndexRectsOld(imageRegion, multiGameStatus);
+            logger.LogError(ex, "使用写死位置逻辑获取角色编号位置失败");
+            throw;
         }
     }
 
