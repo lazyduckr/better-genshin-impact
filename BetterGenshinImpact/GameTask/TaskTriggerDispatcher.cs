@@ -1,4 +1,4 @@
-﻿using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.Helpers;
 using BetterGenshinImpact.View;
@@ -55,7 +55,9 @@ namespace BetterGenshinImpact.GameTask
 
         public event EventHandler? UiTaskStartTickEvent;
 
-        public GameUiCategory PrevGameUiCategory = GameUiCategory.Unknown;
+        private GameUiCategory PrevGameUiCategory = GameUiCategory.Unknown; // 上一个UI类别
+        private DateTime PrevGameUiChangeTime = DateTime.Now; // 上一次UI变化时间
+        
 
         public TaskTriggerDispatcher()
         {
@@ -123,6 +125,7 @@ namespace BetterGenshinImpact.GameTask
         public void Start(IntPtr hWnd, CaptureModes mode, int interval = 50)
         {
             // 初始化截图器
+            ChatUiHotkeyGuard.Reset();
             GameCapture = GameCaptureFactory.Create(mode);
             // 激活窗口 保证后面能够正常获取窗口信息
             SystemControl.ActivateWindow(hWnd);
@@ -165,10 +168,12 @@ namespace BetterGenshinImpact.GameTask
         public void Stop()
         {
             _timer.Stop();
+            ChatUiHotkeyGuard.Reset();
             GameCapture?.Stop();
             _gameRect = RECT.Empty;
             _prevGameActive = false;
             PictureInPictureService.Hide(resetManual: true);
+            HtmlMaskWindow.CloseAll();
             if (_winEventHookMoveSize != default)
             {
                 User32.UnhookWinEvent(_winEventHookMoveSize);
@@ -196,6 +201,8 @@ namespace BetterGenshinImpact.GameTask
             {
                 _timer.Stop();
             }
+
+            ChatUiHotkeyGuard.Reset();
         }
 
         public void Dispose()
@@ -219,6 +226,7 @@ namespace BetterGenshinImpact.GameTask
                 var maskWindow = MaskWindow.Instance();
                 if (GameCapture == null || !GameCapture.IsCapturing)
                 {
+                    ChatUiHotkeyGuard.Reset();
                     if (!TaskContext.Instance().SystemInfo.GameProcess.HasExited)
                     {
                         _logger.LogError("截图器未初始化!");
@@ -231,6 +239,15 @@ namespace BetterGenshinImpact.GameTask
                     PictureInPictureService.Hide(resetManual: true);
                     UiTaskStopTickEvent?.Invoke(sender, e);
                     maskWindow.Invoke(maskWindow.HideSelf);
+                    HtmlMaskWindow.HideAll();
+                    return;
+                }
+                
+                // 如果是最小化状态，直接不进行截图
+                if (SystemControl.IsGenshinImpactMinimized())
+                {
+                    ChatUiHotkeyGuard.Reset();
+                    PictureInPictureService.Hide();
                     return;
                 }
 
@@ -244,6 +261,7 @@ namespace BetterGenshinImpact.GameTask
                 var active = SystemControl.IsGenshinImpactActive();
                 if (!active)
                 {
+                    ChatUiHotkeyGuard.Reset();
                     // 检查游戏是否已结束
                     if (TaskContext.Instance().SystemInfo.GameProcess.HasExited)
                     {
@@ -257,14 +275,12 @@ namespace BetterGenshinImpact.GameTask
                         Debug.WriteLine("游戏窗口不在前台, 不再进行截屏");
                     }
 
-                    if (!TaskContext.Instance().Config.MaskWindowConfig.UseSubform)
+                    var pName = SystemControl.GetActiveProcessName();
+                    if (pName != "Idle" && pName != "BetterGI" && pName != "YuanShen" && pName != "GenshinImpact" && pName != "Genshin Impact Cloud Game")
                     {
-                        var pName = SystemControl.GetActiveProcessName();
-                        if (pName != "Idle" && pName != "BetterGI" && pName != "YuanShen" && pName != "GenshinImpact" && pName != "Genshin Impact Cloud Game")
-                        {
-                            // Debug.WriteLine(pName + "：hide mask window");
-                            maskWindow.Invoke(() => { maskWindow.HideSelf(); });
-                        }
+                        // Debug.WriteLine(pName + "：hide mask window");
+                        maskWindow.Invoke(() => { maskWindow.HideSelf(); });
+                        HtmlMaskWindow.HideAll();
                     }
 
                     _prevGameActive = active;
@@ -300,23 +316,21 @@ namespace BetterGenshinImpact.GameTask
                 else
                 {
                     PictureInPictureService.Hide(resetManual: true);
-                    if (!TaskContext.Instance().Config.MaskWindowConfig.UseSubform)
+                    // if (!_prevGameActive)
+                    // {
+                    maskWindow.BeginInvoke(() =>
                     {
-                        // if (!_prevGameActive)
-                        // {
-                        maskWindow.Invoke(() =>
+                        if (maskWindow.IsExist())
                         {
-                            if (maskWindow.IsExist())
+                            maskWindow.Show();
+                            if (!_prevGameActive)
                             {
-                                maskWindow.Show();
-                                if (!_prevGameActive)
-                                {
-                                    maskWindow.BringToTop();
-                                }
+                                maskWindow.BringToTop();
                             }
-                        });
-                        // }
-                    }
+                        }
+                    });
+                    HtmlMaskWindow.ShowAll();
+                    // }
 
                     _prevGameActive = active;
                     // // 移动游戏窗口的时候同步遮罩窗口的位置,此时不进行捕获
@@ -326,7 +340,8 @@ namespace BetterGenshinImpact.GameTask
                     }
                 }
 
-                if (_triggers == null || !_triggers.Exists(t => t.IsEnabled))
+                var hasEnabledTriggers = _triggers != null && _triggers.Exists(t => t.IsEnabled);
+                if (!hasEnabledTriggers && !active)
                 {
                     // Debug.WriteLine("没有可用的触发器且不处于仅截屏状态, 不再进行截屏");
                     return;
@@ -356,7 +371,13 @@ namespace BetterGenshinImpact.GameTask
                 }
 
                 // 循环执行所有触发器 有独占状态的触发器的时候只执行独占触发器
-                var content = new CaptureContent(bitmap, _frameIndex, _timer.Interval);
+                using var content = new CaptureContent(bitmap, _frameIndex, _timer.Interval);
+                ChatUiHotkeyGuard.UpdateVisualState(Bv.DetectChatUi(content.CaptureRectArea));
+
+                if (!hasEnabledTriggers)
+                {
+                    return;
+                }
 
                 lock (_triggerListLocker)
                 {
@@ -381,10 +402,15 @@ namespace BetterGenshinImpact.GameTask
                     {
                         // 判断当前UI
                         content.CurrentGameUiCategory = Bv.WhichGameUiForTriggers(content.CaptureRectArea);
+                        
+                        if (content.CurrentGameUiCategory != PrevGameUiCategory)
+                        {
+                            PrevGameUiChangeTime = DateTime.Now;
+                        }
 
                         foreach (var trigger in needRunTriggers)
                         {
-                            if (PrevGameUiCategory != content.CurrentGameUiCategory // UI变化了则所有触发器执行一遍
+                            if ((PrevGameUiCategory != content.CurrentGameUiCategory || (DateTime.Now - PrevGameUiChangeTime).TotalSeconds <= 30) // UI变化了后的30s内则所有触发器执行一遍
                                 || trigger.SupportedGameUiCategory == content.CurrentGameUiCategory)
                             {
                                 trigger.OnCapture(content);
@@ -397,7 +423,6 @@ namespace BetterGenshinImpact.GameTask
                 }
 
                 speedTimer.DebugPrint();
-                content.Dispose();
             }
             finally
             {
@@ -441,6 +466,7 @@ namespace BetterGenshinImpact.GameTask
                 _gameRect = new RECT(currentRect);
                 TaskContext.Instance().SystemInfo.CaptureAreaRect = currentRect;
                 MaskWindow.Instance().RefreshPosition();
+                HtmlMaskWindow.UpdateAllPositions();
                 return true;
             }
 

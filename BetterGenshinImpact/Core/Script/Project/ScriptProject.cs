@@ -2,13 +2,18 @@ using BetterGenshinImpact.Core.Config;
 using Microsoft.ClearScript;
 using Microsoft.ClearScript.V8;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using BetterGenshinImpact.Core.Script.Dependence;
+using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.View;
 using Microsoft.ClearScript.JavaScript;
+using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.Core.Script.Project;
 
@@ -29,6 +34,7 @@ public class ScriptProject
         {
             throw new DirectoryNotFoundException("脚本文件夹不存在:" + ProjectPath);
         }
+
         ManifestFile = Path.GetFullPath(Path.Combine(ProjectPath, "manifest.json"));
         if (!File.Exists(ManifestFile))
         {
@@ -46,6 +52,7 @@ public class ScriptProject
         {
             return null;
         }
+
         var stackPanel = new StackPanel
         {
             Margin = new Thickness(0, 0, 20, 0) // 给右侧滚动条留出位置
@@ -69,33 +76,60 @@ public class ScriptProject
         return scrollViewer;
     }
 
-    public IScriptEngine BuildScriptEngine(PathingPartyConfig? partyConfig = null)
+    private IScriptEngine BuildScriptEngine(PathingPartyConfig? partyConfig)
     {
-        IScriptEngine engine = new V8ScriptEngine(V8ScriptEngineFlags.UseCaseInsensitiveMemberBinding | V8ScriptEngineFlags.EnableTaskPromiseConversion);
-        EngineExtend.InitHost(engine, ProjectPath, Manifest.Library,partyConfig);
+        V8ScriptEngine engine = new V8ScriptEngine(V8ScriptEngineFlags.UseCaseInsensitiveMemberBinding | V8ScriptEngineFlags.EnableTaskPromiseConversion);
+
+        // packages 依赖和资源重载
+        var loader = new PackageDocumentLoader(ProjectPath);
+        engine.DocumentSettings.Loader = loader;
+
+        // 添加 packages 到搜索路径
+        var libraries = new HashSet<string>(Manifest.Library ?? Array.Empty<string>())
+        {
+            ".",
+            "./packages"
+        };
+
+        var libraryList = libraries.ToList();
+
+        EngineExtend.InitHost(engine, ProjectPath, libraryList.ToArray(), partyConfig);
         return engine;
     }
 
-    public async Task ExecuteAsync(dynamic? context = null, PathingPartyConfig? partyConfig=null)
+    public async Task ExecuteAsync(dynamic? context = null, PathingPartyConfig? partyConfig = null)
     {
         // 默认值
         GlobalMethod.SetGameMetrics(1920, 1080);
         // 加载代码
         var code = await LoadCode();
         var engine = BuildScriptEngine(partyConfig);
+
+        // 使用自定义加载器解析脚本文件
+        var loader = (PackageDocumentLoader)engine.DocumentSettings.Loader;
+
         if (context != null)
         {
             // 写入配置的内容
             engine.AddHostObject("settings", context);
         }
+
         try
         {
-            if (Manifest.Library.Length != 0)
+            bool useModule = Manifest.Library.Length != 0 ||
+                             code.Contains("import ", StringComparison.Ordinal) ||
+                             code.Contains("export ", StringComparison.Ordinal);
+
+            if (useModule)
             {
                 // 清除Document缓存
                 DocumentLoader.Default.DiscardCachedDocuments();
 
-                var evaluation = engine.Evaluate(new DocumentInfo { Category = ModuleCategory.Standard }, code);
+                string mainScriptPath = Path.Combine(ProjectPath, Manifest.Main);
+                string runtimeCode = loader.RewriteScriptCode(code, mainScriptPath);
+                
+                var documentInfo = new DocumentInfo(new Uri(mainScriptPath)) { Category = ModuleCategory.Standard };
+                var evaluation = engine.Evaluate(documentInfo, runtimeCode);
                 if (evaluation is Task task) await task;
             }
             else
@@ -111,6 +145,16 @@ public class ScriptProject
         }
         finally
         {
+            // 终止代码执行
+            try
+            {
+                engine.Interrupt();
+            }
+            catch (Exception e)
+            {
+                TaskControl.Logger.LogError(e, "中断脚本执行异常：" + e.Message);
+            }
+
             engine.Dispose();
         }
     }

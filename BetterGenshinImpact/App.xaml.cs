@@ -52,8 +52,7 @@ public partial class App : Application
         .UseElevated()
         .UseSingleInstance("BetterGI")
         .ConfigureLogging(builder => { builder.ClearProviders(); })
-        .ConfigureServices(
-            (context, services) =>
+        .ConfigureServices((context, services) =>
             {
                 // 提前初始化配置
                 var configService = new ConfigService();
@@ -74,19 +73,37 @@ public partial class App : Application
                         rollingInterval: RollingInterval.Day,
                         retainedFileCountLimit: 31,
                         retainedFileTimeLimit: TimeSpan.FromDays(21))
-                    .WriteTo.Console(outputTemplate: 
+                    .WriteTo.Console(outputTemplate:
                         "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
                     .MinimumLevel.Debug()
                     .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
                     .MinimumLevel.Override("Microsoft.Hosting.Lifetime", LogEventLevel.Warning);
-                if (all.MaskWindowConfig.MaskEnabled)
+                if (all.MaskWindowConfig is { MaskEnabled: true, ShowLogBox: true })
                 {
                     loggerConfiguration.WriteTo.RichTextBox(richTextBox, LogEventLevel.Information,
                         "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}");
                 }
 
                 Log.Logger = loggerConfiguration.CreateLogger();
+                services.AddSingleton<IMissingTranslationReporter, SupabaseMissingTranslationReporter>();
+                services.AddSingleton<ITranslationService, JsonTranslationService>();
+
                 services.AddLogging(c => c.AddSerilog());
+                // if ("zh-Hans".Equals(all.OtherConfig.UiCultureInfoName, StringComparison.OrdinalIgnoreCase))
+                // {
+                //     services.AddLogging(c => c.AddSerilog());
+                // }
+                // else
+                // {
+                //     services.AddLogging(logging =>
+                //     {
+                //         logging.ClearProviders();
+                //         logging.SetMinimumLevel(LogLevel.Debug);
+                //         logging.AddFilter("Microsoft", LogLevel.Warning);
+                //         logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Warning);
+                //         logging.Services.AddSingleton<ILoggerProvider, TranslatingSerilogLoggerProvider>();
+                //     });
+                // }
 
                 services.AddLocalization();
 
@@ -147,14 +164,15 @@ public partial class App : Application
                 services.AddSingleton<MemoryFileCache>();
                 services.AddSingleton<IMihoyoMapApiService, MihoyoMapApiService>();
                 services.AddSingleton<IKongyingTavernApiService, KongyingTavernApiService>();
+                services.AddSingleton<IHoYoLabMapApiService, HoYoLabMapApiService>();
                 services.AddSingleton<IMaskMapPointService, MaskMapPointService>();
-                
+
                 services.AddSingleton(TimeProvider.System);
                 services.AddSingleton<IServerTimeProvider, ServerTimeProvider>();
 
                 // Configuration
                 //services.Configure<AppConfig>(context.Configuration.GetSection(nameof(AppConfig)));
-                
+
                 I18N.Culture = new CultureInfo("zh-Hans"); // #1846
             }
         )
@@ -207,9 +225,18 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            // DEBUG only, no overhead
             Debug.WriteLine(ex);
             ConsoleHelper.WriteError($"应用程序启动失败: {ex.Message}");
+
+            try
+            {
+                HandleException(ex);
+            }
+            catch (Exception ex2)
+            {
+                Debug.WriteLine(ex2);
+                ConsoleHelper.WriteError($"应用程序启动失败打印日志时又失败了: {ex2.Message}");
+            }
 
             if (Debugger.IsAttached)
             {
@@ -226,12 +253,12 @@ public partial class App : Application
         base.OnExit(e);
 
         ConsoleHelper.WriteLine("BetterGI 应用程序正在关闭...");
-        
+
         TempManager.CleanUp();
 
         await _host.StopAsync();
         _host.Dispose();
-        
+
         // 释放控制台窗口
         ConsoleHelper.FreeConsoleWindow();
     }
@@ -255,6 +282,12 @@ public partial class App : Application
     {
         try
         {
+            // 忽略V8引擎释放后pending的Task回调抛出的异常
+            if (IsV8EngineReleasedException(e.Exception))
+            {
+                return;
+            }
+
             HandleException(e.Exception);
         }
         catch (Exception ex)
@@ -265,6 +298,21 @@ public partial class App : Application
         {
             e.SetObserved();
         }
+    }
+
+    private static bool IsV8EngineReleasedException(Exception? ex)
+    {
+        while (ex != null)
+        {
+            if (ex.Message?.Contains("V8 object has been released") == true)
+            {
+                return true;
+            }
+
+            ex = ex.InnerException;
+        }
+
+        return false;
     }
 
     //非UI线程未捕获异常处理事件(例如自己创建的一个子线程)

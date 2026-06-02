@@ -30,8 +30,13 @@ github_actions_cache/
 
 # Rider
 .idea
-.trae
-.claude
-CLAUDE.md
 
 __pycache__/
+
+
+# Trae
+.trae/*
+!.trae/rules/
+!.trae/rules/**
+!.trae/skills/
+!.trae/skills/**

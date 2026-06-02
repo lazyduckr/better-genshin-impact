@@ -37,6 +37,18 @@ public partial class AutoSkipConfig : ObservableObject
     private int _afterChooseOptionSleepDelay = 0;
 
     /// <summary>
+    /// 选择剧情选项前，通过游戏进程音频的人声检测自动等待语音结束
+    /// </summary>
+    [ObservableProperty]
+    private bool _autoWaitDialogueOptionVoiceEnabled = false;
+
+    /// <summary>
+    /// 人声检测等待语音结束的最大等待时间（秒）
+    /// </summary>
+    [ObservableProperty]
+    private int _dialogueOptionVoiceMaxWaitSeconds = 30;
+
+    /// <summary>
     /// 点击对话框前的延迟（毫秒）
     /// </summary>
     [ObservableProperty]
@@ -124,6 +136,12 @@ public partial class AutoSkipConfig : ObservableObject
     /// </summary>
     [ObservableProperty]
     private bool _runBackgroundEnabled = false;
+    
+    /// <summary>
+    /// 后台剧情结束后切回游戏前台
+    /// </summary>
+    [ObservableProperty]
+    private bool _bringGameToFrontAfterBackgroundDialogEnabled = false;
 
     /// <summary>
     /// 提交物品

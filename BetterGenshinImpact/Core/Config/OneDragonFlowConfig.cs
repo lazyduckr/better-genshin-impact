@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask.AutoLeyLineOutcrop;
 using BetterGenshinImpact.Helpers;
 using CommunityToolkit.Mvvm.ComponentModel;
 
@@ -45,13 +46,13 @@ public partial class OneDragonFlowConfig : ObservableObject
     [ObservableProperty]
     private int _minResinToKeep = 0;
     
-    // 领取每日奖励的好感数量
+    // 普通周日或限时奖励选项
     [ObservableProperty]
     private string _sundayEverySelectedValue = "0";
-    
-    // 领取每日奖励的好感数量
+
+    // 每周秘境的全局限时奖励选项，单日留空时使用
     [ObservableProperty]
-    private string _sundaySelectedValue = "0";
+    private string _sundayWeeklySelectedValue = "0";
     
     // 尘歌壶传送方式，1. 地图传送 2. 尘歌壶道具
     [ObservableProperty]
@@ -61,6 +62,87 @@ public partial class OneDragonFlowConfig : ObservableObject
     [ObservableProperty]
     private List<string> _secretTreasureObjects = new();
 
+    // 地脉花一条龙模式（跳过部分准备流程）
+    [ObservableProperty]
+    private bool _leyLineOneDragonMode = false;
+
+    // 地脉花运行日期设置
+    [ObservableProperty]
+    private bool _leyLineRunMonday = true;
+
+    [ObservableProperty]
+    private bool _leyLineRunTuesday = true;
+
+    [ObservableProperty]
+    private bool _leyLineRunWednesday = true;
+
+    [ObservableProperty]
+    private bool _leyLineRunThursday = true;
+
+    [ObservableProperty]
+    private bool _leyLineRunFriday = true;
+
+    [ObservableProperty]
+    private bool _leyLineRunSaturday = true;
+
+    [ObservableProperty]
+    private bool _leyLineRunSunday = true;
+
+    // 地脉花每日类型与国家配置（为空则使用独立任务配置）
+    [ObservableProperty]
+    private string _leyLineMondayType = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineMondayCountry = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineTuesdayType = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineTuesdayCountry = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineWednesdayType = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineWednesdayCountry = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineThursdayType = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineThursdayCountry = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineFridayType = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineFridayCountry = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineSaturdayType = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineSaturdayCountry = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineSundayType = string.Empty;
+
+    [ObservableProperty]
+    private string _leyLineSundayCountry = string.Empty;
+
+    // 地脉花刷取次数（0 表示使用独立任务配置）
+    [ObservableProperty]
+    private int _leyLineRunCount = 0;
+
+    // 地脉花树脂耗尽模式
+    [ObservableProperty]
+    private bool _leyLineResinExhaustionMode = false;
+
+    // 地脉花刷取次数取小值（仅耗尽模式生效）
+    [ObservableProperty]
+    private bool _leyLineOpenModeCountMin = false;
+
     #region 每周秘境配置
 
     //周一
@@ -69,6 +151,9 @@ public partial class OneDragonFlowConfig : ObservableObject
     
     [ObservableProperty]
     private string _mondayDomainName = string.Empty;
+
+    [ObservableProperty]
+    private string _mondaySelectedValue = "0";
     
     
     //周二
@@ -77,6 +162,9 @@ public partial class OneDragonFlowConfig : ObservableObject
     
     [ObservableProperty]
     private string _tuesdayDomainName = string.Empty;
+
+    [ObservableProperty]
+    private string _tuesdaySelectedValue = "0";
     
     //周三
     [ObservableProperty]
@@ -84,6 +172,9 @@ public partial class OneDragonFlowConfig : ObservableObject
     
     [ObservableProperty]
     private string _wednesdayDomainName = string.Empty;
+
+    [ObservableProperty]
+    private string _wednesdaySelectedValue = "0";
     
     //周四
     [ObservableProperty]
@@ -91,6 +182,9 @@ public partial class OneDragonFlowConfig : ObservableObject
     
     [ObservableProperty]
     private string _thursdayDomainName = string.Empty;
+
+    [ObservableProperty]
+    private string _thursdaySelectedValue = "0";
     
     //周五
     [ObservableProperty]
@@ -98,6 +192,9 @@ public partial class OneDragonFlowConfig : ObservableObject
     
     [ObservableProperty]
     private string _fridayDomainName = string.Empty;
+
+    [ObservableProperty]
+    private string _fridaySelectedValue = "0";
     
     //周六
     [ObservableProperty]
@@ -105,6 +202,9 @@ public partial class OneDragonFlowConfig : ObservableObject
     
     [ObservableProperty]
     private string _saturdayDomainName = string.Empty;
+
+    [ObservableProperty]
+    private string _saturdaySelectedValue = "0";
     
     //周日
     [ObservableProperty]
@@ -112,6 +212,9 @@ public partial class OneDragonFlowConfig : ObservableObject
 
     [ObservableProperty]
     private string _sundayDomainName = string.Empty;
+
+    [ObservableProperty]
+    private string _sundaySelectedValue = "0";
 
     // 完成后操作
     [ObservableProperty]
@@ -126,20 +229,92 @@ public partial class OneDragonFlowConfig : ObservableObject
             var dayOfWeek = (serverTime.Hour >= 4 ? serverTime : serverTime.AddDays(-1)).DayOfWeek;
             return dayOfWeek switch
             {
-                DayOfWeek.Monday => (MondayPartyName, MondayDomainName,SundaySelectedValue),
-                DayOfWeek.Tuesday => (TuesdayPartyName, TuesdayDomainName,SundaySelectedValue),
-                DayOfWeek.Wednesday => (WednesdayPartyName, WednesdayDomainName,SundaySelectedValue),
-                DayOfWeek.Thursday => (ThursdayPartyName, ThursdayDomainName,SundaySelectedValue),
-                DayOfWeek.Friday => (FridayPartyName, FridayDomainName,SundaySelectedValue),
-                DayOfWeek.Saturday => (SaturdayPartyName, SaturdayDomainName,SundaySelectedValue),
-                DayOfWeek.Sunday => (SundayPartyName, SundayDomainName,SundaySelectedValue),
-                _ => (PartyName, DomainName,SundaySelectedValue)
+                DayOfWeek.Monday => (GetWeeklyPartyName(MondayPartyName), GetWeeklyDomainName(MondayDomainName), GetWeeklySelectedValue(MondaySelectedValue)),
+                DayOfWeek.Tuesday => (GetWeeklyPartyName(TuesdayPartyName), GetWeeklyDomainName(TuesdayDomainName), GetWeeklySelectedValue(TuesdaySelectedValue)),
+                DayOfWeek.Wednesday => (GetWeeklyPartyName(WednesdayPartyName), GetWeeklyDomainName(WednesdayDomainName), GetWeeklySelectedValue(WednesdaySelectedValue)),
+                DayOfWeek.Thursday => (GetWeeklyPartyName(ThursdayPartyName), GetWeeklyDomainName(ThursdayDomainName), GetWeeklySelectedValue(ThursdaySelectedValue)),
+                DayOfWeek.Friday => (GetWeeklyPartyName(FridayPartyName), GetWeeklyDomainName(FridayDomainName), GetWeeklySelectedValue(FridaySelectedValue)),
+                DayOfWeek.Saturday => (GetWeeklyPartyName(SaturdayPartyName), GetWeeklyDomainName(SaturdayDomainName), GetWeeklySelectedValue(SaturdaySelectedValue)),
+                DayOfWeek.Sunday => (GetWeeklyPartyName(SundayPartyName), GetWeeklyDomainName(SundayDomainName), GetWeeklySelectedValue(SundaySelectedValue)),
+                _ => (PartyName, DomainName, SundayWeeklySelectedValue)
             };
         }
         else
         {
-            return (PartyName, DomainName,SundayEverySelectedValue);
+            return (PartyName, DomainName, SundayEverySelectedValue);
         }
+    }
+
+    private string GetWeeklyPartyName(string partyName)
+    {
+        return string.IsNullOrWhiteSpace(partyName) ? PartyName : partyName;
+    }
+
+    private string GetWeeklyDomainName(string domainName)
+    {
+        return string.IsNullOrWhiteSpace(domainName) ? DomainName : domainName;
+    }
+
+    private string GetWeeklySelectedValue(string selectedValue)
+    {
+        return string.IsNullOrWhiteSpace(selectedValue) || selectedValue == "0" ? SundayWeeklySelectedValue : selectedValue;
+    }
+
+    public bool ShouldRunLeyLineToday()
+    {
+        if (!LeyLineRunMonday
+            && !LeyLineRunTuesday
+            && !LeyLineRunWednesday
+            && !LeyLineRunThursday
+            && !LeyLineRunFriday
+            && !LeyLineRunSaturday
+            && !LeyLineRunSunday)
+        {
+            return true;
+        }
+
+        var serverTime = ServerTimeHelper.GetServerTimeNow();
+        var dayOfWeek = (serverTime.Hour >= 4 ? serverTime : serverTime.AddDays(-1)).DayOfWeek;
+        return dayOfWeek switch
+        {
+            DayOfWeek.Monday => LeyLineRunMonday,
+            DayOfWeek.Tuesday => LeyLineRunTuesday,
+            DayOfWeek.Wednesday => LeyLineRunWednesday,
+            DayOfWeek.Thursday => LeyLineRunThursday,
+            DayOfWeek.Friday => LeyLineRunFriday,
+            DayOfWeek.Saturday => LeyLineRunSaturday,
+            DayOfWeek.Sunday => LeyLineRunSunday,
+            _ => true
+        };
+    }
+
+    public (string type, string country) GetLeyLineConfigForToday(AutoLeyLineOutcropConfig fallback)
+    {
+        var serverTime = ServerTimeHelper.GetServerTimeNow();
+        var dayOfWeek = (serverTime.Hour >= 4 ? serverTime : serverTime.AddDays(-1)).DayOfWeek;
+        var (type, country) = dayOfWeek switch
+        {
+            DayOfWeek.Monday => (LeyLineMondayType, LeyLineMondayCountry),
+            DayOfWeek.Tuesday => (LeyLineTuesdayType, LeyLineTuesdayCountry),
+            DayOfWeek.Wednesday => (LeyLineWednesdayType, LeyLineWednesdayCountry),
+            DayOfWeek.Thursday => (LeyLineThursdayType, LeyLineThursdayCountry),
+            DayOfWeek.Friday => (LeyLineFridayType, LeyLineFridayCountry),
+            DayOfWeek.Saturday => (LeyLineSaturdayType, LeyLineSaturdayCountry),
+            DayOfWeek.Sunday => (LeyLineSundayType, LeyLineSundayCountry),
+            _ => (string.Empty, string.Empty)
+        };
+
+        if (string.IsNullOrWhiteSpace(type))
+        {
+            type = fallback.LeyLineOutcropType;
+        }
+
+        if (string.IsNullOrWhiteSpace(country))
+        {
+            country = fallback.Country;
+        }
+
+        return (type, country);
     }
 
     #endregion
