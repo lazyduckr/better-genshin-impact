@@ -1,4 +1,6 @@
 using System;
+using System.Collections.ObjectModel;
+using BetterGenshinImpact.Service.Notifier;
 using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace BetterGenshinImpact.Service.Notification;
@@ -106,6 +108,11 @@ public partial class NotificationConfig : ObservableObject
     ///     钉钉Webhook地址
     /// </summary>
     [ObservableProperty] private string _dingdingWebhookUrl = string.Empty;
+
+    /// <summary>
+    ///     一条龙结束后发送汇总通知（体力+委托奖励，附拼接截图）
+    /// </summary>
+    [ObservableProperty] private bool _dragonEndSummaryEnabled = false;
 
     // Email 通知配置
     [ObservableProperty] private bool _emailNotificationEnabled;
@@ -252,9 +259,32 @@ public partial class NotificationConfig : ObservableObject
     [ObservableProperty] private bool _xxtuiNotificationEnabled;
 
     /// <summary>
-    ///     Discord Webhook推送通知是否启用
+    ///     Discord 推送通知是否启用。
+    ///     这是 Discord 通知的总开关，Webhook 与 Bot 两种方式共用；
+    ///     属性名保留历史命名，避免旧配置文件失效。
     /// </summary>
     [ObservableProperty] private bool _discordWebhookNotificationEnabled;
+
+    /// <summary>
+    ///     Discord 通知方式：Webhook（频道 Webhook）或 Bot（机器人 Token + 频道 ID）
+    /// </summary>
+    [ObservableProperty] private string _discordNotificationMode = DiscordNotificationModes.Webhook;
+
+    /// <summary>
+    ///     Discord 机器人 Token（Bot 方式）
+    /// </summary>
+    [ObservableProperty] private string _discordBotToken = string.Empty;
+
+    /// <summary>
+    ///     Discord 机器人推送目标清单（Bot 方式）。
+    ///     频道与私信可以混用，逐项推送；单项失败不影响其他项。
+    /// </summary>
+    [ObservableProperty] private ObservableCollection<DiscordBotTarget> _discordBotTargets = [];
+
+    /// <summary>
+    ///     Discord 机器人消息格式：Plain（纯文本）或 Embed（嵌入卡片）
+    /// </summary>
+    [ObservableProperty] private string _discordBotMessageFormat = DiscordBotMessageFormats.Plain;
 
     /// <summary>
     ///     Discord Webhook地址
@@ -286,4 +316,86 @@ public partial class NotificationConfig : ObservableObject
     ///     ServerChan SendKey
     /// </summary>
     [ObservableProperty] private string _serverChanSendKey = string.Empty;
+
+    /// <summary>
+    ///     MeoW通知是否启用
+    /// </summary>
+    [ObservableProperty] private bool _meowNotificationEnabled;
+
+    /// <summary>
+    ///     MeoW用户昵称
+    /// </summary>
+    [ObservableProperty] private string _meowNickname = string.Empty;
+
+    /// <summary>
+    ///     MeoW消息标题（可选，路径参数）
+    /// </summary>
+    [ObservableProperty] private string _meowTitle = string.Empty;
+
+    /// <summary>
+    ///     Gotify通知是否启用
+    /// </summary>
+    [ObservableProperty] private bool _gotifyNotificationEnabled;
+
+    /// <summary>
+    ///     Gotify服务地址
+    /// </summary>
+    [ObservableProperty] private string _gotifyUrl = string.Empty;
+
+    /// <summary>
+    ///     Gotify服务APP Token
+    /// </summary>
+    [ObservableProperty] private string _gotifyAppToken = string.Empty;
+
+    /// <summary>
+    ///     Gotify通知优先级
+    /// </summary>
+    [ObservableProperty] private int _gotifyNotifyLevel = 3;
+
+    /// <summary>
+    ///     QQ通知是否启用
+    /// </summary>
+    [ObservableProperty] private bool _qqNotificationEnabled;
+
+    /// <summary>
+    ///     QQ开放平台 AppID
+    /// </summary>
+    [ObservableProperty] private string _qqAppId = string.Empty;
+
+    /// <summary>
+    ///     QQ开放平台 AppSecret
+    /// </summary>
+    [ObservableProperty] private string _qqClientSecret = string.Empty;
+
+    /// <summary>
+    ///     用户的 C2C OpenID（单聊场景）
+    /// </summary>
+    [ObservableProperty] private string _qqOpenId = string.Empty;
+
+    /// <summary>
+    ///     群聊 OpenID（群聊场景）
+    /// </summary>
+    [ObservableProperty] private string _qqGroupOpenId = string.Empty;
+
+    [ObservableProperty] private string _qqMessageFormat = "text";
+
+    /// <summary>
+    ///     微信 Clawbot 通知是否启用
+    /// </summary>
+    [ObservableProperty] private bool _wechatClawbotNotificationEnabled;
+
+    /// <summary>
+    ///     微信 Clawbot 扫码登录获得的 bot_token
+    /// </summary>
+    [ObservableProperty] private string _wechatClawbotBotToken = string.Empty;
+
+    /// <summary>
+    ///     微信 Clawbot 推送目标用户 ID（用户给机器人发消息后自动获取）
+    /// </summary>
+    [ObservableProperty] private string _wechatClawbotToUserId = string.Empty;
+
+    /// <summary>
+    ///     微信 Clawbot API 基础地址（登录响应 baseurl；为空时使用默认 https://ilinkai.weixin.qq.com）
+    /// </summary>
+    [ObservableProperty] private string _wechatClawbotBaseUrl = string.Empty;
 }

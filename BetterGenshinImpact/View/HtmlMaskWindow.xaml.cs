@@ -2,8 +2,11 @@ using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
 using Vanara.PInvoke;
@@ -11,6 +14,7 @@ using static Vanara.PInvoke.User32;
 using BetterGenshinImpact.Core.Script.Dependence;
 using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.Helpers;
 using Microsoft.Extensions.Logging;
 using Microsoft.Web.WebView2.Core;
 
@@ -23,15 +27,19 @@ public partial class HtmlMaskWindow : Window
 {
     private static readonly ConcurrentDictionary<string, HtmlMaskWindow> _windows = new();
     private const int MaxWindows = 5;
+    private const string HtmlMaskProfileName = "HtmlMask";
 
     private readonly string _id;
     private readonly string _workDir;
     private readonly string _webView2DataPath;
+    private readonly string? _virtualHostName;
     private readonly string _pageUrl;
     private bool _navigationCompleted;
     private bool _styleCaptured;
     private int _originalStyle;
     private volatile bool _isClickThrough = true;
+    private bool _isClosing;
+    private Task? _initializationTask;
     private readonly System.Windows.Media.SolidColorBrush _backgroundBrush = new();
 
     /// <summary>
@@ -47,13 +55,59 @@ public partial class HtmlMaskWindow : Window
     private HtmlMaskWindow(string url, string? id, string workDir)
     {
         _id = id ?? Guid.NewGuid().ToString("N");
-        _workDir = workDir;
-        _webView2DataPath = Path.Combine(workDir, "WebView2Data");
-        _pageUrl = url;
+        _workDir = Path.GetFullPath(workDir);
+        _webView2DataPath = Path.Combine(AppContext.BaseDirectory, "WebView2Data");
+
+        var scriptName = Path.GetFileName(Path.TrimEndingDirectorySeparator(_workDir));
+        var scriptKey = CreateScriptKey(scriptName);
+
+        if (Uri.TryCreate(url, UriKind.Absolute, out var pageUri) && pageUri.IsFile)
+        {
+            _virtualHostName = $"hm-{scriptKey}.bettergi.local";
+            _pageUrl = CreateVirtualPageUrl(pageUri, _workDir, _virtualHostName);
+        }
+        else
+        {
+            _pageUrl = url;
+        }
+
         InitializeComponent();
         ClickThroughBorder.Background = _backgroundBrush;
         Loaded += OnLoaded;
-        InitializeAsync(url);
+        Closing += (_, _) => _isClosing = true;
+    }
+
+    private static string CreateScriptKey(string scriptName)
+    {
+        var normalizedName = scriptName.ToUpperInvariant();
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedName));
+        return Convert.ToHexString(hash.AsSpan(0, 4)).ToLowerInvariant();
+    }
+
+    private static string CreateVirtualPageUrl(Uri fileUri, string workDir, string virtualHostName)
+    {
+        var pagePath = Path.GetFullPath(fileUri.LocalPath);
+        var relativePath = Path.GetRelativePath(workDir, pagePath);
+
+        if (Path.IsPathRooted(relativePath)
+            || relativePath.Equals("..", StringComparison.Ordinal)
+            || relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            || relativePath.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
+        {
+            throw new ArgumentException($"HTML页面路径越界访问: {fileUri}", nameof(fileUri));
+        }
+
+        var escapedPath = string.Join('/', relativePath
+            .Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(Uri.EscapeDataString));
+
+        var uriBuilder = new UriBuilder(Uri.UriSchemeHttps, virtualHostName)
+        {
+            Path = $"/{escapedPath}",
+            Query = fileUri.Query.TrimStart('?'),
+            Fragment = fileUri.Fragment.TrimStart('#')
+        };
+        return uriBuilder.Uri.AbsoluteUri;
     }
 
     #region 静态窗口管理
@@ -100,6 +154,19 @@ public partial class HtmlMaskWindow : Window
             return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// 重新加载指定窗口。窗口仍在初始化时无需额外操作，初始化完成后会读取最新页面内容。
+    /// </summary>
+    public static bool Reload(string id)
+    {
+        if (!_windows.TryGetValue(id, out var window))
+        {
+            return false;
+        }
+
+        return window.Dispatcher.Invoke(window.ReloadCore);
     }
 
     /// <summary>
@@ -238,23 +305,44 @@ public partial class HtmlMaskWindow : Window
 
     #endregion
 
-    private void OnLoaded(object sender, RoutedEventArgs e)
+    private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         SetClickThrough(true);
         UpdatePosition();
+
+        if (_initializationTask != null)
+        {
+            return;
+        }
+
+        _initializationTask = InitializeAsync();
+        await _initializationTask;
     }
 
-    private async void InitializeAsync(string url)
+    private async Task InitializeAsync()
     {
         try
         {
-            await WebView.EnsureCoreWebView2Async(
-                await CoreWebView2Environment.CreateAsync(null, _webView2DataPath));
+            var environment = await CoreWebView2Environment.CreateAsync(null, _webView2DataPath);
+            if (_isClosing) return;
+
+            var controllerOptions = environment.CreateCoreWebView2ControllerOptions();
+            controllerOptions.ProfileName = HtmlMaskProfileName;
+            await WebView.EnsureCoreWebView2Async(environment, controllerOptions);
+            if (_isClosing) return;
 
             WebView.DefaultBackgroundColor = System.Drawing.Color.Transparent;
             WebView.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
             WebView.CoreWebView2.Settings.IsScriptEnabled = true;
             WebView.CoreWebView2.Settings.IsWebMessageEnabled = true;
+
+            if (_virtualHostName != null)
+            {
+                WebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                    _virtualHostName,
+                    _workDir,
+                    CoreWebView2HostResourceAccessKind.Deny);
+            }
 
             // 拦截网络请求，仅允许注册过的域名
             WebView.CoreWebView2.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
@@ -304,6 +392,7 @@ public partial class HtmlMaskWindow : Window
                     window.htmlMask._dispatch(e.data);
                 });
             ");
+            if (_isClosing) return;
 
             // 监听HTML发来的消息，解析 url + data + requestId
             WebView.CoreWebView2.WebMessageReceived += (_, e) =>
@@ -350,15 +439,48 @@ public partial class HtmlMaskWindow : Window
                 });
             };
 
-            if (!string.IsNullOrEmpty(url))
+            if (!string.IsNullOrEmpty(_pageUrl))
             {
-                WebView.Source = new Uri(url);
+                WebView.Source = new Uri(_pageUrl);
             }
+        }
+        catch (Exception e) when (_isClosing)
+        {
+            // 窗口关闭会销毁 WebView2 的宿主句柄，尚未完成的初始化会以 E_ABORT 结束。
+            TaskControl.Logger.LogDebug(e, "HTML遮罩窗口已关闭，WebView2 初始化已取消");
         }
         catch (Exception e)
         {
-            TaskControl.Logger.LogError($"WebView2 初始化失败: {e.Message}");
-            Dispatcher.Invoke(() => Close());
+            TaskControl.Logger.LogError(e, "WebView2 初始化失败");
+            if (!_isClosing)
+            {
+                Close();
+            }
+        }
+    }
+
+    private bool ReloadCore()
+    {
+        if (_isClosing)
+        {
+            return false;
+        }
+
+        try
+        {
+            // 初始化尚未完成时，首次导航会直接读取磁盘上的最新内容。
+            if (WebView.CoreWebView2 == null)
+            {
+                return true;
+            }
+
+            _navigationCompleted = false;
+            WebView.CoreWebView2.Reload();
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
         }
     }
 
@@ -374,10 +496,18 @@ public partial class HtmlMaskWindow : Window
             // 允许数据URI
             if (uri.Scheme == "data") return;
 
+            // 虚拟主机只映射当前脚本目录，允许页面及其相对资源正常加载
+            if (_virtualHostName != null
+                && uri.Scheme == Uri.UriSchemeHttps
+                && uri.Host.Equals(_virtualHostName, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
             // 本地文件：必须在脚本目录内
             if (uri.Scheme == "file")
             {
-                var localPath = Uri.UnescapeDataString(uri.AbsolutePath);
+                var localPath = uri.LocalPath;
                 var fullDir = Path.GetFullPath(_workDir);
                 var fullFile = Path.GetFullPath(localPath);
                 if (fullFile.StartsWith(fullDir, StringComparison.OrdinalIgnoreCase)) return;
@@ -390,7 +520,7 @@ public partial class HtmlMaskWindow : Window
             if (string.Equals(uri.AbsoluteUri, _pageUrl, StringComparison.OrdinalIgnoreCase)) return;
 
             // HTTP/HTTPS 请求：与 JS 脚本使用完全一致的权限校验
-            var currentProject = TaskContext.Instance().CurrentScriptProject;
+            var currentProject = RunnerContext.Instance.CurrentScriptProject;
             if (currentProject?.AllowJsHTTP != true)
             {
                 TaskControl.Logger.LogWarning("未启用JS HTTP权限，拦截HTML遮罩网络请求: {Uri}", e.Request.Uri);
@@ -434,12 +564,13 @@ public partial class HtmlMaskWindow : Window
             var currentRect = SystemControl.GetCaptureRect(gameHandle);
             if (currentRect.Width <= 0 || currentRect.Height <= 0) return;
 
+            var dpiScale = DpiHelper.GetScale(gameHandle);
             Dispatcher.Invoke(() =>
             {
-                Left = currentRect.Left;
-                Top = currentRect.Top;
-                Width = currentRect.Width;
-                Height = currentRect.Height;
+                Left = currentRect.Left / dpiScale.X;
+                Top = currentRect.Top / dpiScale.Y;
+                Width = currentRect.Width / dpiScale.X;
+                Height = currentRect.Height / dpiScale.Y;
             });
         }
         catch (Exception ex)

@@ -27,6 +27,11 @@ public class PaddleOcrService : IOcrService, IDisposable
     private readonly Det _localDetModel;
 
     private readonly Rec _localRecModel;
+    private readonly object _inferenceLock = new();
+    private bool _disposed;
+
+    /// <summary>Gets or sets the official recognition score threshold used to discard low-confidence results.</summary>
+    public float DropScore { get; set; } = 0.5f;
 
     public record PaddleOcrModelType(
         BgiOnnxModel DetectionModel,
@@ -101,14 +106,14 @@ public class PaddleOcrService : IOcrService, IDisposable
                 recognitionModel,
                 recognitionVersion,
                 recLabel ?? (() => DefaultRecLabelFunc(recognitionModel)),
-                TestImagePath);
+                preHeatImagePath ?? TestImagePath);
         }
 
-        public (Det, Rec) Build(BgiOnnxFactory onnxFactory)
+        public (Det, Rec) Build(BgiOnnxSessionFactory onnxFactory)
         {
-            return (
-                new Det(DetectionModel, DetectionVersion, onnxFactory),
-                new Rec(RecognitionModel, RecLabel(), RecognitionVersion, onnxFactory));
+            var detection = new Det(DetectionModel, DetectionVersion, onnxFactory);
+            try { return (detection, new Rec(RecognitionModel, RecLabel(), RecognitionVersion, onnxFactory)); }
+            catch { detection.Dispose(); throw; }
         }
 
         public static readonly PaddleOcrModelType V4 = Create(
@@ -129,6 +134,12 @@ public class PaddleOcrService : IOcrService, IDisposable
             OcrVersionConfig.PpOcrV5,
             BgiOnnxModel.PaddleOcrRecV5,
             OcrVersionConfig.PpOcrV5);
+
+        public static readonly PaddleOcrModelType V6 = Create(
+            BgiOnnxModel.PaddleOcrDetV6,
+            OcrVersionConfig.PpOcrV6,
+            BgiOnnxModel.PaddleOcrRecV6,
+            OcrVersionConfig.PpOcrV6);
 
         public static readonly PaddleOcrModelType V5Latin = Create(
             BgiOnnxModel.PaddleOcrDetV5,
@@ -241,18 +252,32 @@ public class PaddleOcrService : IOcrService, IDisposable
     }
 
     public PaddleOcrService(BgiOnnxFactory bgiOnnxFactory, PaddleOcrModelType modelType)
+        : this(bgiOnnxFactory.ForCurrentRuntime(), modelType)
+    {
+    }
+
+    internal PaddleOcrService(BgiOnnxSessionFactory bgiOnnxFactory, PaddleOcrModelType modelType)
     {
         var (modelsDet, modelsRec) = modelType.Build(bgiOnnxFactory);
         _localDetModel = modelsDet;
         _localRecModel = modelsRec;
 
-        // 预热模型
-        using var preHeatImageMat = Bv.ImRead(modelType.PreHeatImagePath) ??
-                                    throw new FileNotFoundException($"预热图片未找到: {modelType.PreHeatImagePath}");
-        // Debug输出结果
-        var preHeatResult = RunAll(preHeatImageMat, 1);
-        Debug.WriteLine(
-            $"PaddleOcrService 预热完成，使用模型: {modelType.DetectionModel.Name} 和 {modelType.RecognitionModel.Name}，结果: {preHeatResult.Text}");
+        try
+        {
+            // 预热模型
+            using var preHeatImageMat = Bv.ImRead(modelType.PreHeatImagePath) ??
+                                        throw new FileNotFoundException($"预热图片未找到: {modelType.PreHeatImagePath}");
+            // Debug输出结果
+            var preHeatResult = RunAll(preHeatImageMat, 1);
+            Debug.WriteLine(
+                $"PaddleOcrService 预热完成，使用模型: {modelType.DetectionModel.Name} 和 {modelType.RecognitionModel.Name}，结果: {preHeatResult.Text}");
+        }
+        catch
+        {
+            _localDetModel.Dispose();
+            _localRecModel.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -268,13 +293,17 @@ public class PaddleOcrService : IOcrService, IDisposable
     /// </summary>
     public OcrResult OcrResult(Mat mat)
     {
-        if (mat.Channels() == 4)
+        lock (_inferenceLock)
         {
-            using var mat3 = mat.CvtColor(ColorConversionCodes.BGRA2BGR);
-            return _OcrResult(mat3);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (mat.Channels() == 4)
+            {
+                using var mat3 = mat.CvtColor(ColorConversionCodes.BGRA2BGR);
+                return _OcrResult(mat3);
         }
 
         return _OcrResult(mat);
+        }
     }
 
     /// <summary>
@@ -282,11 +311,15 @@ public class PaddleOcrService : IOcrService, IDisposable
     /// </summary>
     public string OcrWithoutDetector(Mat mat)
     {
-        var startTime = Stopwatch.GetTimestamp();
-        var str = _localRecModel.Run(mat).Text;
-        var time = Stopwatch.GetElapsedTime(startTime);
-        Debug.WriteLine($"PaddleOcrWithoutDetector 耗时 {time.TotalMilliseconds}ms 结果: {str}");
-        return str;
+        lock (_inferenceLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var startTime = Stopwatch.GetTimestamp();
+            var str = _localRecModel.Run(mat).Text;
+            var time = Stopwatch.GetElapsedTime(startTime);
+            // Debug.WriteLine($"PaddleOcrWithoutDetector 耗时 {time.TotalMilliseconds}ms 结果: {str}");
+            return str;
+        }
     }
 
     private OcrResult _OcrResult(Mat mat)
@@ -294,7 +327,7 @@ public class PaddleOcrService : IOcrService, IDisposable
         var startTime = Stopwatch.GetTimestamp();
         var result = RunAll(mat);
         var time = Stopwatch.GetElapsedTime(startTime);
-        Debug.WriteLine($"PaddleOcr 耗时 {time.TotalMilliseconds}ms 结果: {result.Text}");
+        // Debug.WriteLine($"PaddleOcr 耗时 {time.TotalMilliseconds}ms 结果: {result.Text}");
         return result;
     }
 
@@ -303,18 +336,18 @@ public class PaddleOcrService : IOcrService, IDisposable
     /// </summary>
     private OcrResult RunAll(Mat src, int recognizeBatchSize = 0)
     {
-        var rects = _localDetModel.Run(src);
-        Mat[] mats =
-            rects.Select(rect =>
-                {
-                    var roi = src[GetCropedRect(rect.BoundingRect(), src.Size())];
-                    return roi;
-                })
-                .ToArray();
+        var boxes = SortBoxes(_localDetModel.RunBoxes(src));
+        List<Mat> mats = new(boxes.Length);
         try
         {
-            return new OcrResult(_localRecModel.Run(mats, recognizeBatchSize)
-                .Select((result, i) => new OcrResultRegion(rects[i], result.Text, result.Score))
+            foreach (var box in boxes)
+            {
+                mats.Add(GetRotateCropImage(src, box.Points));
+            }
+
+            return new OcrResult(_localRecModel.Run(mats.ToArray(), recognizeBatchSize)
+                .Select((result, i) => new OcrResultRegion(boxes[i].Rect, result.Text, result.Score))
+                .Where(region => region.Score >= DropScore)
                 .ToArray());
         }
         finally
@@ -324,25 +357,95 @@ public class PaddleOcrService : IOcrService, IDisposable
     }
 
     /// <summary>
-    ///     Gets the cropped region of the source image specified by the given rectangle, clamping the rectangle coordinates to
-    ///     the image bounds.
+    ///     按 PaddleOCR 官方 get_rotate_crop_image 的方式对检测框执行透视裁剪。
     /// </summary>
-    /// <param name="rect">The rectangle to crop.</param>
-    /// <param name="size">The size of the source image.</param>
-    /// <returns>The cropped rectangle.</returns>
-    private static Rect GetCropedRect(Rect rect, Size size)
+    /// <param name="src">原始图像。</param>
+    /// <param name="points">按左上、右上、右下、左下排列的四个顶点。</param>
+    /// <returns>透视变换后的文字图像。</returns>
+    private static Mat GetRotateCropImage(Mat src, Point2f[] points)
     {
-        return Rect.FromLTRB(
-            Math.Clamp(rect.Left, 0, size.Width),
-            Math.Clamp(rect.Top, 0, size.Height),
-            Math.Clamp(rect.Right, 0, size.Width),
-            Math.Clamp(rect.Bottom, 0, size.Height));
+        if (points.Length != 4)
+        {
+            throw new ArgumentException("OCR detection box must contain exactly four points.", nameof(points));
+        }
+
+        var cropWidth = (int)Math.Max(GetDistance(points[0], points[1]), GetDistance(points[2], points[3]));
+        var cropHeight = (int)Math.Max(GetDistance(points[0], points[3]), GetDistance(points[1], points[2]));
+        if (cropWidth <= 0 || cropHeight <= 0)
+        {
+            throw new InvalidOperationException($"Invalid OCR crop size: {cropWidth}x{cropHeight}");
+        }
+
+        Point2f[] destinationPoints =
+        [
+            new(0, 0),
+            new(cropWidth, 0),
+            new(cropWidth, cropHeight),
+            new(0, cropHeight)
+        ];
+        using var transform = Cv2.GetPerspectiveTransform(points, destinationPoints);
+        var cropped = new Mat();
+        try
+        {
+            Cv2.WarpPerspective(src, cropped, transform, new Size(cropWidth, cropHeight),
+                InterpolationFlags.Cubic, BorderTypes.Replicate);
+
+            if (cropped.Height * 1.0 / cropped.Width >= 1.5)
+            {
+                Cv2.Rotate(cropped, cropped, RotateFlags.Rotate90Counterclockwise);
+            }
+
+            return cropped;
+        }
+        catch
+        {
+            cropped.Dispose();
+            throw;
+        }
+    }
+
+    private static double GetDistance(Point2f first, Point2f second)
+    {
+        var deltaX = first.X - second.X;
+        var deltaY = first.Y - second.Y;
+        return Math.Sqrt(deltaX * deltaX + deltaY * deltaY);
+    }
+
+    private static PaddleOcrDetectionBox[] SortBoxes(PaddleOcrDetectionBox[] source)
+    {
+        var boxes = source
+            .OrderBy(box => box.Points[0].Y)
+            .ThenBy(box => box.Points[0].X)
+            .ToArray();
+
+        for (var i = 0; i < boxes.Length - 1; i++)
+        {
+            for (var j = i; j >= 0; j--)
+            {
+                if (Math.Abs(boxes[j + 1].Points[0].Y - boxes[j].Points[0].Y) < 10
+                    && boxes[j + 1].Points[0].X < boxes[j].Points[0].X)
+                {
+                    (boxes[j], boxes[j + 1]) = (boxes[j + 1], boxes[j]);
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+
+        return boxes;
     }
 
     public void Dispose()
     {
-        _localDetModel.Dispose();
-        _localRecModel.Dispose();
+        lock (_inferenceLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            try { _localDetModel.Dispose(); }
+            finally { _localRecModel.Dispose(); }
+        }
     }
 
     /// <summary>

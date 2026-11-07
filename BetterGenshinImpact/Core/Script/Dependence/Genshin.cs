@@ -1,4 +1,4 @@
-﻿using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.AutoTrackPath;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.Common.Job;
@@ -16,12 +16,14 @@ using BetterGenshinImpact.GameTask.Common.Map.Maps.Base;
 using BetterGenshinImpact.GameTask.Common.Exceptions;
 using BetterGenshinImpact.GameTask.Common.Map.Maps;
 using BetterGenshinImpact.Helpers.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.Core.Script.Dependence;
 
 public class Genshin
 {
     private RECT captureAreaRect = TaskContext.Instance().SystemInfo.CaptureAreaRect;
+    private readonly ILogger<Genshin> _logger = App.GetLogger<Genshin>();
 
     /// <summary>
     /// 游戏宽度
@@ -75,7 +77,6 @@ public class Genshin
         await new TpTask(CancellationContext.Instance.Cts.Token).Tp(x, y, mapName, force);
     }
 
-
     public async Task Tp(double x, double y, bool force)
     {
         await new TpTask(CancellationContext.Instance.Cts.Token).Tp(x, y, MapTypes.Teyvat.ToString(), force);
@@ -123,6 +124,23 @@ public class Genshin
     }
 
     /// <summary>
+    /// 点击大地图上的指定坐标。
+    /// </summary>
+    /// <remarks>
+    /// 该方法会先把目标移动到大地图的可点击安全区域，再执行一次点击。
+    /// </remarks>
+    /// <param name="x">目标X坐标。</param>
+    /// <param name="y">目标Y坐标。</param>
+    /// <param name="forceCountry">强制指定移动大地图时先切换的国家，默认为null。</param>
+    public async Task ClickMapPoint(double x, double y, string? forceCountry = null)
+    {
+        TpTask tpTask = new TpTask(CancellationContext.Instance.Cts.Token);
+        await tpTask.CheckInBigMapUi();
+        await tpTask.SwitchRecentlyCountryMap(x, y, forceCountry);
+        await tpTask.ClickMapPoint(x, y, MapTypes.Teyvat.ToString());
+    }
+
+    /// <summary>
     /// 移动大地图到指定坐标
     /// </summary>
     /// <remarks>
@@ -157,7 +175,8 @@ public class Genshin
     public double GetBigMapZoomLevel()
     {
         TpTask tpTask = new(CancellationContext.Instance.Cts.Token);
-        return tpTask.GetBigMapZoomLevel(CaptureToRectArea());
+        using var capture = CaptureToRectArea();
+        return tpTask.GetBigMapZoomLevel(capture);
     }
 
     /// <summary>
@@ -224,7 +243,7 @@ public class Genshin
 
     public float GetCameraOrientation()
     {
-        var imageRegion = CaptureToRectArea();
+        using var imageRegion = CaptureToRectArea();
         return CameraOrientation.Compute(imageRegion.SrcMat);
     }
 
@@ -242,7 +261,7 @@ public class Genshin
     
     public Point2f? GetPositionFromMapWithMatchingMethod(string mapName, string matchingMethod, int cacheTimeMs = 900)
     {
-        var imageRegion = CaptureToRectArea();
+        using var imageRegion = CaptureToRectArea();
         if (!Bv.IsInMainUi(imageRegion))
         {
             throw new InvalidOperationException("不在主界面，无法识别小地图坐标");
@@ -261,7 +280,7 @@ public class Genshin
     /// <returns>包含X和Y坐标的Point2f结构体</returns>
     public Point2f? GetPositionFromMap(string mapName, float x, float y)
     {
-        var imageRegion = CaptureToRectArea();
+        using var imageRegion = CaptureToRectArea();
         if (!Bv.IsInMainUi(imageRegion))
         {
             throw new InvalidOperationException("不在主界面，无法识别小地图坐标");
@@ -287,12 +306,51 @@ public class Genshin
         {
             return await new SwitchPartyTask().Start(partyName, CancellationContext.Instance.Cts.Token);
         }
-        catch (PartySetupFailedException ex)
+        catch (PartySetupFailedException)
         {
-            return false;//释放失败状态到JS，否则失败后会退出任务。
+            return false;//释放失败状态给调用方，否则失败后会退出任务。
         }
     }
-    
+
+    /// <summary>
+    /// 按槽位重组当前队伍角色。
+    /// </summary>
+    /// <param name="slot1">1 号位角色名。</param>
+    /// <param name="slot2">2 号位角色名。</param>
+    /// <param name="slot3">3 号位角色名。</param>
+    /// <param name="slot4">4 号位角色名。</param>
+    /// <param name="usePhysicalSlots">是否将 slot1-slot4 解释为队伍物理槽位；false 时按当前玩家可控角色顺序解释。</param>
+    /// <returns>完成保存并返回主界面返回 true；参数无效、目标角色未找到或流程失败返回 false。</returns>
+    /// <remarks>
+    /// 未传入的槽位默认跳过；空字符串表示跳过对应槽位。
+    /// 物理槽位调用示例：<c>await genshin.SwitchCharacter("胡桃", "夜兰", "", "钟离");</c>
+    /// 可控顺序调用示例：<c>await genshin.SwitchCharacter("胡桃", "夜兰", "", "", false);</c>
+    /// 该方法表示重组队伍槽位角色，不是按数字键切换当前出战角色。
+    /// </remarks>
+    public async Task<bool> SwitchCharacter(
+        string slot1 = "",
+        string slot2 = "",
+        string slot3 = "",
+        string slot4 = "",
+        bool usePhysicalSlots = true)
+    {
+        try
+        {
+            return await new SwitchCharacterStateMachineTask().Start(
+                slot1,
+                slot2,
+                slot3,
+                slot4,
+                usePhysicalSlots,
+                CancellationContext.Instance.Cts.Token);
+        }
+        catch (PartySetupFailedException ex)
+        {
+            _logger.LogError(ex, "切换角色失败：{Message}", ex.Message);
+            return false;
+        }
+    }
+
     /// <summary>
     /// 清除当前调度器的队伍缓存
     /// </summary>
@@ -358,7 +416,30 @@ public class Genshin
     /// <returns></returns>
     public async Task GoToCraftingBench(string country)
     {
-        await new GoToCraftingBenchTask().Start(country, CancellationContext.Instance.Cts.Token);
+        await new GoToCraftingBenchTask().GoToCraftingBench(country, CancellationContext.Instance.Cts.Token);
+    }
+
+    /// <summary>
+    /// 前往合成台合成浓缩树脂
+    /// </summary>
+    /// <param name="country">国家名称</param>
+    /// <returns></returns>
+    public async Task GoCraftResin(string country)
+    {
+        await new GoToCraftingBenchTask().GoCraftResin(country, CancellationContext.Instance.Cts.Token);
+    }
+
+    /// <summary>
+    /// 在当前已打开的合成界面中合成指定材料。
+    /// </summary>
+    /// <param name="materialName">目标成品材料名。</param>
+    /// <param name="quantity">目标合成个数，必须大于 0。</param>
+    /// <param name="materialType">材料筛选类型；为空时从物品模型 CSV 中读取。</param>
+    /// <param name="bonusType">合成加成角色类型，可为“概率返还素材”或“概率额外产出”；为空时不切换加成。</param>
+    /// <returns>合成执行结果。</returns>
+    public async Task<CraftMaterialResult> CraftMaterial(string materialName, int quantity, string? materialType = null, string? bonusType = null)
+    {
+        return await new CraftMaterialTask(materialName, quantity, materialType, bonusType).Start(CancellationContext.Instance.Cts.Token);
     }
 
     /// <summary>

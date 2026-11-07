@@ -42,7 +42,7 @@ public class BgiOnnxModel
     /// <summary>
     /// 用于捡东西等的大世界模型
     /// </summary>
-    public static readonly BgiOnnxModel BgiWorld = Register("BgiTree", @"Assets\Model\World\bgi_world.onnx");
+    public static readonly BgiOnnxModel BgiWorld = Register("BgiWorld", @"Assets\Model\World\bgi_world.onnx");
 
     /// <summary>
     /// 矿物识别模型
@@ -60,6 +60,30 @@ public class BgiOnnxModel
     /// </summary>
     public static readonly BgiOnnxModel BgiQClassify =
         Register("BgiQClassify", @"Assets\Model\Common\q_classify_sim.onnx");
+
+    /// <summary>
+    /// E技能就绪分类模型
+    /// </summary>
+    public static readonly BgiOnnxModel BgiEClassify =
+        Register("BgiEClassify", @"Assets\Model\Common\e_classify_sim.onnx");
+
+    /// <summary>
+    /// 队伍配置角色头像识别模型
+    /// </summary>
+    public static readonly BgiOnnxModel AvatarGridIcon =
+        Register("AvatarGridIcon", @"Assets\Model\AvatarGridIcon\avatar.onnx");
+
+    /// <summary>
+    /// 物品网格图标识别模型，固定使用 CPU。
+    /// </summary>
+    public static readonly BgiOnnxModel GridIcon =
+        Register("GridIcon", @"Assets\Model\Item\gridIcon.onnx");
+
+    /// <summary>
+    /// 物品图标识别模型，固定使用 CPU。
+    /// </summary>
+    public static readonly BgiOnnxModel ItemIcon =
+        Register("ItemIcon", @"Assets\Model\ItemV2\item.onnx");
 
     /// <summary>
     /// Silero 人声检测模型
@@ -80,6 +104,12 @@ public class BgiOnnxModel
         Register("PpOcrDetV5", @"Assets\Model\PaddleOCR\Det\V5\PP-OCRv5_mobile_det_infer\slim.onnx");
 
     /// <summary>
+    /// paddleOCR V6 检测模型
+    /// </summary>
+    public static readonly BgiOnnxModel PaddleOcrDetV6 =
+        Register("PpOcrDetV6", @"Assets\Model\PaddleOCR\Det\V6\PP-OCRv6_small_det_infer\slim.onnx");
+
+    /// <summary>
     /// paddleOCR V4 识别模型
     /// </summary>
     public static readonly BgiOnnxModel PaddleOcrRecV4 =
@@ -96,6 +126,12 @@ public class BgiOnnxModel
     /// </summary>
     public static readonly BgiOnnxModel PaddleOcrRecV5 =
         Register("PpOcrRecV5", @"Assets\Model\PaddleOCR\Rec\V5\PP-OCRv5_mobile_rec_infer\slim.onnx");
+
+    /// <summary>
+    /// paddleOCR V6 识别模型
+    /// </summary>
+    public static readonly BgiOnnxModel PaddleOcrRecV6 =
+        Register("PpOcrRecV6", @"Assets\Model\PaddleOCR\Rec\V6\PP-OCRv6_small_rec_infer\slim.onnx");
 
     /// <summary>
     /// paddleOCR V5 拉丁文 识别模型
@@ -117,7 +153,7 @@ public class BgiOnnxModel
 
     #endregion
 
-    private BgiOnnxModel(string name, string modelRelativePath, string cacheRelativePath)
+    public BgiOnnxModel(string name, string modelRelativePath, string cacheRelativePath)
     {
         Name = name;
         ModelRelativePath = modelRelativePath;

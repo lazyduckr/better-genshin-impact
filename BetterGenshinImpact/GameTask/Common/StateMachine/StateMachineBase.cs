@@ -13,29 +13,69 @@ namespace BetterGenshinImpact.GameTask.Common.StateMachine;
 using static TaskControl;
 
 /// <summary>
-/// 状态处理器返回结果，决定状态机如何处理当前状态
+/// 状态处理器基础结果。
 /// </summary>
-public enum StateHandlerResult
+public enum StateHandlerStatus
 {
-    /// <summary>
-    /// 成功：操作完成，状态机自动等待邻接状态转换；转场超时会占用当前状态的重试次数
-    /// </summary>
     Success,
-
-    /// <summary>
-    /// 等待：可预期的等待，状态机继续循环重新检测
-    /// </summary>
     Wait,
-
-    /// <summary>
-    /// 重试：意外失败，状态机重试直到超过最大次数
-    /// </summary>
     Retry,
+    Fail
+}
+
+/// <summary>
+/// 状态处理器返回结果，决定状态机如何处理当前状态。
+/// 可通过 SuccessTo 指定本次动作允许到达的邻接状态。
+/// </summary>
+public readonly struct StateHandlerResult
+{
+    private StateHandlerResult(StateHandlerStatus status, IReadOnlyList<Enum> targetStates)
+    {
+        Status = status;
+        TargetStates = targetStates;
+    }
 
     /// <summary>
-    /// 失败：无法恢复的错误，状态机抛出异常
+    /// 基础处理结果。
     /// </summary>
-    Fail
+    public StateHandlerStatus Status { get; }
+
+    /// <summary>
+    /// 本次动作允许到达的目标状态集合。
+    /// 空集合表示使用当前状态的全部邻接状态。
+    /// </summary>
+    public IReadOnlyList<Enum> TargetStates { get; }
+
+    public static StateHandlerResult Success { get; } = Create(StateHandlerStatus.Success);
+
+    public static StateHandlerResult Wait { get; } = Create(StateHandlerStatus.Wait);
+
+    public static StateHandlerResult Retry { get; } = Create(StateHandlerStatus.Retry);
+
+    public static StateHandlerResult Fail { get; } = Create(StateHandlerStatus.Fail);
+
+    /// <summary>
+    /// 创建成功结果，并将目标收窄到当前状态图中的指定邻接状态。
+    /// </summary>
+    public static StateHandlerResult SuccessTo<TState>(params TState[] targetStates)
+        where TState : struct, Enum
+    {
+        if (targetStates == null || targetStates.Length == 0)
+        {
+            throw new ArgumentException("SuccessTo 至少需要一个目标状态", nameof(targetStates));
+        }
+
+        var distinctTargets = targetStates
+            .Cast<Enum>()
+            .Distinct()
+            .ToArray();
+        return new StateHandlerResult(StateHandlerStatus.Success, Array.AsReadOnly(distinctTargets));
+    }
+
+    private static StateHandlerResult Create(StateHandlerStatus status)
+    {
+        return new StateHandlerResult(status, Array.Empty<Enum>());
+    }
 }
 
 /// <summary>
@@ -81,7 +121,7 @@ public sealed class StateHandlerAttribute(object state) : Attribute
     public int RetryInterval { get; set; } = -1;
 
     /// <summary>
-    /// 当前状态 Handler 返回 Success 后等待邻接状态转换的超时时间（毫秒）。
+    /// 当前状态 Handler 返回 Success 后，源状态持续可见多久才触发当前状态重试（毫秒）。
     /// </summary>
     public int TransitionTimeout { get; set; } = -1;
 }
@@ -116,6 +156,20 @@ public sealed class UnknownStateHandlerAttribute : Attribute
 /// </summary>
 public abstract class StateMachineBase<TState, TContext> where TState : struct, Enum
 {
+    private enum StateTransitionWaitStatus
+    {
+        ReachedTarget,
+        RetryCurrentState,
+        IntermediateTimeout
+    }
+
+    private readonly struct StateTransitionWaitResult(StateTransitionWaitStatus status, TState state = default)
+    {
+        public StateTransitionWaitStatus Status { get; } = status;
+
+        public TState State { get; } = state;
+    }
+
     /// <summary>
     /// 由子类实现以提供 Logger
     /// </summary>
@@ -154,7 +208,7 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
     protected int CurrentStateRetryInterval { get; private set; }
 
     /// <summary>
-    /// 当前状态 Handler 返回 Success 后等待邻接状态转换的超时时间（毫秒）。
+    /// 当前状态 Handler 返回 Success 后，源状态持续可见多久才触发当前状态重试（毫秒）。
     /// </summary>
     protected int CurrentStateTransitionTimeout { get; private set; }
 
@@ -191,7 +245,7 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
     private readonly Dictionary<TState, int> _stateRetryIntervals = new();
 
     /// <summary>
-    /// 状态转换超时表 - 未注册时使用默认状态转换超时
+    /// 源状态保持超时表 - 未注册时使用默认源状态保持超时
     /// </summary>
     private readonly Dictionary<TState, int> _stateTransitionTimeouts = new();
 
@@ -206,7 +260,7 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
     protected virtual int DefaultDetectionInterval => 300;
 
     /// <summary>
-    /// 默认状态转换超时（毫秒）
+    /// 默认源状态保持超时（毫秒）
     /// </summary>
     protected virtual int DefaultTransitionTimeout => 3000;
 
@@ -534,13 +588,13 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
     }
 
     /// <summary>
-    /// 注册指定状态 Handler 返回 Success 后等待邻接状态转换的超时时间。
+    /// 注册指定状态 Handler 返回 Success 后，源状态持续可见多久才触发当前状态重试。
     /// </summary>
     protected void RegisterStateTransitionTimeout(TState state, int timeoutMs)
     {
         if (timeoutMs <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(timeoutMs), "状态转换超时时间必须大于 0");
+            throw new ArgumentOutOfRangeException(nameof(timeoutMs), "源状态保持超时时间必须大于 0");
         }
 
         _stateTransitionTimeouts[state] = timeoutMs;
@@ -617,7 +671,7 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
     /// <param name="targetStates">目标状态（到达任一即停止）</param>
     /// <param name="maxIterations">最大迭代次数（防止无限循环）</param>
     /// <param name="maxRetries">默认单个状态最大重试次数，可通过 RegisterStateRetryLimit 覆盖指定状态</param>
-    /// <exception cref="InvalidOperationException">Handler 返回 Fail、重试超限、转场超时超限或达到最大迭代次数时抛出</exception>
+    /// <exception cref="InvalidOperationException">Handler 返回 Fail、重试超限、中间态等待超时或达到最大迭代次数时抛出</exception>
     protected async Task RunStateMachineUntil(TContext context, TState[] targetStates, int maxIterations = 1000, int maxRetries = 5)
     {
         Logger.LogInformation("========== 状态机启动，目标状态：{Targets} ==========",
@@ -668,36 +722,43 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
             {
                 var result = await handler(context);
 
-                switch (result)
+                switch (result.Status)
                 {
-                    case StateHandlerResult.Success:
-                        // 成功：等待邻接状态转换；转场超时视为当前状态的一次重试
-                        var nextState = await EnsureNextStateTransition(transitionTimeout);
-                        if (EqualityComparer<TState>.Default.Equals(nextState, default))
+                    case StateHandlerStatus.Success:
+                        // 成功：等待指定的目标状态，或当前状态的全部邻接状态。
+                        var transitionResult = result.TargetStates.Count > 0
+                            ? await WaitStateTransitionTo(result.TargetStates, transitionTimeout)
+                            : await WaitNextStateTransition(transitionTimeout);
+                        switch (transitionResult.Status)
                         {
-                            RecordStateRetry("等待邻接状态转换超时", retryPolicy, stateRetryStopwatch);
-                            nextLoopInterval = retryInterval;
-                        }
-                        else
-                        {
-                            CurrentStateRetryCount = 0; // 成功转换后重置重试计数
-                            stateRetryStopwatch.Restart();
+                            case StateTransitionWaitStatus.ReachedTarget:
+                                CurrentStateRetryCount = 0; // 成功转换后重置重试计数
+                                stateRetryStopwatch.Restart();
+                                break;
+
+                            case StateTransitionWaitStatus.RetryCurrentState:
+                                RecordStateRetry("源状态持续可见，触发当前状态重试", retryPolicy, stateRetryStopwatch);
+                                nextLoopInterval = retryInterval;
+                                break;
+
+                            case StateTransitionWaitStatus.IntermediateTimeout:
+                                throw new InvalidOperationException($"状态 {CurrentState} 等待中间态转换超时");
                         }
                         break;
 
-                    case StateHandlerResult.Wait:
-                        // 可预期的等待：继续循环，重新检测状态
+                    case StateHandlerStatus.Wait:
+                        // 可预期的等待：状态机继续循环，重新检测状态。
                         Logger.LogDebug("Handler 返回 Wait，状态机继续等待");
                         break;
 
-                    case StateHandlerResult.Retry:
-                        // 意外失败重试：检查重试次数
+                    case StateHandlerStatus.Retry:
+                        // 意外失败重试：检查重试次数。
                         RecordStateRetry("Handler 返回 Retry", retryPolicy, stateRetryStopwatch);
                         nextLoopInterval = retryInterval;
                         break;
 
-                    case StateHandlerResult.Fail:
-                        // 失败：抛出异常
+                    case StateHandlerStatus.Fail:
+                        // 失败：抛出异常。
                         throw new InvalidOperationException($"状态 {CurrentState} 的 Handler 返回失败");
                 }
             }
@@ -831,21 +892,21 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
     /// <summary>
     /// 等待任一目标状态出现（内部方法）
     /// </summary>
-    /// <param name="expectedStates">可接受的目标状态数组</param>
+    /// <param name="observedStates">可观察状态数组，应包含源状态和可接受的目标状态</param>
     /// <param name="timeoutMs">超时时间（毫秒）</param>
-    /// <returns>转换到的状态，如果超时则返回 default</returns>
-    private async Task<TState> EnsureAnyStateTransition(TState[] expectedStates, int? timeoutMs = null)
+    /// <returns>转换等待结果</returns>
+    private async Task<StateTransitionWaitResult> WaitAnyStateTransition(TState[] observedStates, int? timeoutMs = null)
     {
         var timeout = timeoutMs ?? DefaultTransitionTimeout;
         var sourceState = CurrentState;
-        var transitionTargetStates = expectedStates
+        var transitionTargetStates = observedStates
             .Where(state => !EqualityComparer<TState>.Default.Equals(state, sourceState))
             .ToArray();
 
         if (transitionTargetStates.Length == 0)
         {
             Logger.LogWarning("状态 {State} 没有可等待的非自身邻接状态", sourceState);
-            return default;
+            return new StateTransitionWaitResult(StateTransitionWaitStatus.RetryCurrentState);
         }
 
         var sourceVisibleStopwatch = Stopwatch.StartNew();
@@ -857,17 +918,16 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
         {
             _ct.ThrowIfCancellationRequested();
 
-            // 只检测期望的状态
-            var currentState = DetectStateAmong(transitionTargetStates);
+            // 只检测目标状态和源状态
+            var currentState = DetectStateAmong(observedStates);
             if (transitionTargetStates.Contains(currentState))
             {
                 CurrentState = currentState;
                 Logger.LogDebug("状态转换成功：{State}", currentState);
-                return currentState;
+                return new StateTransitionWaitResult(StateTransitionWaitStatus.ReachedTarget, currentState);
             }
 
-            var detectedState = DetectCurrentState();
-            if (EqualityComparer<TState>.Default.Equals(detectedState, sourceState))
+            if (EqualityComparer<TState>.Default.Equals(currentState, sourceState))
             {
                 intermediateStopwatch.Restart();
             }
@@ -881,15 +941,77 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
 
         if (sourceVisibleStopwatch.ElapsedMilliseconds >= timeout)
         {
-            Logger.LogWarning("状态转换超时，期望任一：{Expected}，当前仍停留在原状态：{Current}",
-                string.Join(",", transitionTargetStates), sourceState);
+            Logger.LogWarning("源状态 {State} 持续可见超过 {Timeout} ms，触发当前状态重试，期望任一：{Expected}",
+                sourceState, timeout, string.Join(",", transitionTargetStates));
+            return new StateTransitionWaitResult(StateTransitionWaitStatus.RetryCurrentState);
         }
         else
         {
-            Logger.LogWarning("状态转换超时，期望任一：{Expected}，中间态等待超过 {Timeout} ms，当前：{Current}",
-                string.Join(",", transitionTargetStates), intermediateTimeout, DetectCurrentState());
+            Logger.LogWarning("中间态等待超过 {Timeout} ms，期望任一：{Expected}",
+                intermediateTimeout, string.Join(",", transitionTargetStates));
+            return new StateTransitionWaitResult(StateTransitionWaitStatus.IntermediateTimeout);
         }
-        return default;
+    }
+
+    /// <summary>
+    /// 等待转换到 Handler 指定的目标状态集合。
+    /// </summary>
+    private async Task<StateTransitionWaitResult> WaitStateTransitionTo(IReadOnlyList<Enum> targetStates, int? timeoutMs = null)
+    {
+        var possibleStates = GetPossibleNextStates();
+        if (possibleStates == null || possibleStates.Length == 0)
+        {
+            throw new InvalidOperationException($"当前状态 {CurrentState} 没有注册邻接状态，无法使用 SuccessTo");
+        }
+
+        var typedTargetStates = new TState[targetStates.Count];
+        for (var i = 0; i < targetStates.Count; i++)
+        {
+            if (targetStates[i] is not TState typedState)
+            {
+                throw new InvalidOperationException($"状态 {CurrentState} 的 SuccessTo 目标类型 {targetStates[i].GetType().Name} 与状态机状态类型 {typeof(TState).Name} 不匹配");
+            }
+
+            if (!possibleStates.Contains(typedState))
+            {
+                throw new InvalidOperationException($"状态 {CurrentState} 的 SuccessTo 目标 {typedState} 不是合法邻接状态");
+            }
+
+            if (!_stateDetectors.ContainsKey(typedState))
+            {
+                throw new InvalidOperationException($"状态 {CurrentState} 的 SuccessTo 目标 {typedState} 未注册状态检测器");
+            }
+
+            typedTargetStates[i] = typedState;
+        }
+
+        var observedStates = typedTargetStates
+            .Concat(new[] { CurrentState })
+            .Distinct()
+            .ToArray();
+        return await WaitAnyStateTransition(observedStates, timeoutMs);
+    }
+
+    /// <summary>
+    /// 等待转换到邻接状态（使用状态转换关系）。
+    /// 自动使用当前状态注册的邻接状态作为期望状态。
+    /// </summary>
+    /// <param name="timeoutMs">超时时间（毫秒）</param>
+    /// <returns>转换等待结果</returns>
+    private async Task<StateTransitionWaitResult> WaitNextStateTransition(int? timeoutMs = null)
+    {
+        var possibleStates = GetPossibleNextStates();
+        if (possibleStates == null || possibleStates.Length == 0)
+        {
+            Logger.LogWarning("当前状态 {State} 没有注册邻接状态，无法确定期望状态", CurrentState);
+            return new StateTransitionWaitResult(StateTransitionWaitStatus.RetryCurrentState);
+        }
+
+        var observedStates = possibleStates
+            .Concat(new[] { CurrentState })
+            .Distinct()
+            .ToArray();
+        return await WaitAnyStateTransition(observedStates, timeoutMs);
     }
 
     /// <summary>
@@ -897,17 +1019,11 @@ public abstract class StateMachineBase<TState, TContext> where TState : struct, 
     /// 自动使用当前状态注册的邻接状态作为期望状态
     /// </summary>
     /// <param name="timeoutMs">超时时间（毫秒）</param>
-    /// <returns>转换到的状态，如果没有注册邻接状态则返回 default</returns>
+    /// <returns>转换到的状态；没有注册邻接状态、源状态保持超时或中间态等待超时时返回 default</returns>
     protected async Task<TState> EnsureNextStateTransition(int? timeoutMs = null)
     {
-        var possibleStates = GetPossibleNextStates();
-        if (possibleStates == null || possibleStates.Length == 0)
-        {
-            Logger.LogWarning("当前状态 {State} 没有注册邻接状态，无法确定期望状态", CurrentState);
-            return default;
-        }
-
-        return await EnsureAnyStateTransition(possibleStates, timeoutMs);
+        var result = await WaitNextStateTransition(timeoutMs);
+        return result.Status == StateTransitionWaitStatus.ReachedTarget ? result.State : default;
     }
 
     #endregion

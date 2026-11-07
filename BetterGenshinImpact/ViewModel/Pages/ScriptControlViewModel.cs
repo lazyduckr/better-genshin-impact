@@ -12,7 +12,6 @@ using BetterGenshinImpact.Model;
 using BetterGenshinImpact.Service.Interface;
 using BetterGenshinImpact.View.Controls.Webview;
 using BetterGenshinImpact.View.Pages.View;
-using BetterGenshinImpact.View.Behavior;
 using BetterGenshinImpact.View.Windows;
 using BetterGenshinImpact.View.Windows.Editable;
 using BetterGenshinImpact.ViewModel.Pages.View;
@@ -317,6 +316,7 @@ public partial class ScriptControlViewModel : ViewModel
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
         uiMessageBox.SourceInitialized += (s, e) => WindowHelper.TryApplySystemBackdrop(uiMessageBox);
+        WindowHelper.CenterOnVisibleOwner(uiMessageBox);
 
         void OnQuestionButtonOnClick(object sender, RoutedEventArgs args)
         {
@@ -423,15 +423,16 @@ public partial class ScriptControlViewModel : ViewModel
                     gameInfo = await TravelsDiaryDetailManager.UpdateTravelsDiaryDetailManager(cookieValue);
                     Toast.Success($"米游社数据获取成功，开始进行解析，请耐心等待！");
                 }
-                catch (Exception)
+                catch (Exception e)
                 {
+                    _logger.LogWarning(e, "日志分析获取米游社数据失败：{Msg}", e.Message);
                     if (realGameInfo != null)
                     {
-                        Toast.Warning("访问米游社接口异常，此次将锄地统计将不更新最新数据！");
+                        Toast.Warning($"访问米游社失败：{e.Message}，此次锄地统计不更新最新数据");
                     }
                     else
                     {
-                        Toast.Warning("访问米游社接口异常，此次将不启用锄地统计！");
+                        Toast.Warning($"访问米游社失败：{e.Message}，此次不启用锄地统计");
                     }
                 }
             }
@@ -636,26 +637,9 @@ public partial class ScriptControlViewModel : ViewModel
             }
             else
             {
-                var newScriptGroup = JsonSerializer.Deserialize<ScriptGroup>(JsonSerializer.Serialize(item));
-                if (newScriptGroup != null)
-                {
-                    newScriptGroup.Name = str;
-                    ScriptGroup.ResetGroupInfo(newScriptGroup);
-                    foreach (var project in newScriptGroup.Projects)
-                    {
-                        try
-                        {
-                            project.BuildScriptProjectRelation();
-                        }
-                        catch
-                        {
-                            // ignored
-                        }
-                    }
-                    ScriptGroups.Add(newScriptGroup);
-                }
-
-                //WriteScriptGroup(newScriptGroup);
+                var newScriptGroup = ScriptGroup.FromJson(JsonSerializer.Serialize(item));
+                newScriptGroup.Name = str;
+                ScriptGroups.Add(newScriptGroup);
             }
         }
     }
@@ -901,11 +885,7 @@ public partial class ScriptControlViewModel : ViewModel
                 "请选择需要添加的地图追踪任务",
                 "请选择需要添加的地图追踪任务",
                 stackPanel,
-                new Size(600, 720),
-                new PromptDialogConfig
-                {
-                    DisableAutoTranslate = true
-                });
+                new Size(600, 720));
 
             if (!string.IsNullOrEmpty(result))
             {
@@ -1590,14 +1570,14 @@ public partial class ScriptControlViewModel : ViewModel
     }
 
     [RelayCommand]
-    public void OnEditScriptCommon(ScriptGroupProject? item)
+    public async Task OnEditScriptCommon(ScriptGroupProject? item)
     {
         if (item == null)
         {
             return;
         }
 
-        ShowEditWindow(item);
+        await ShowEditWindowAsync(item);
 
         // foreach (var group in ScriptGroups)
         // {
@@ -1629,13 +1609,10 @@ public partial class ScriptControlViewModel : ViewModel
         item.NextFlag = true;
     }
 
-    public static void ShowEditWindow(ScriptGroupProject project)
+    public static async Task ShowEditWindowAsync(ScriptGroupProject project)
     {
-        var viewModel = new ScriptGroupProjectEditorViewModel(project);
-        var editor = new ScriptGroupProjectEditor(project)
-        {
-            DataContext = viewModel
-        };
+        using var viewModel = new ScriptGroupProjectEditorViewModel(project);
+        var editor = new ScriptGroupProjectEditor(viewModel);
         var uiMessageBox = new Wpf.Ui.Controls.MessageBox
         {
             Title = "修改通用设置",
@@ -1644,7 +1621,9 @@ public partial class ScriptControlViewModel : ViewModel
             Owner = Application.Current.MainWindow,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
-        uiMessageBox.ShowDialogAsync();
+        WindowHelper.CenterOnVisibleOwner(uiMessageBox);
+        await uiMessageBox.ShowDialogAsync();
+        editor.DataContext = null;
     }
 
     [RelayCommand]
@@ -1687,7 +1666,7 @@ public partial class ScriptControlViewModel : ViewModel
                 Owner = Application.Current.MainWindow,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
             };
-            AutoTranslateInterceptor.SetEnableAutoTranslate(uiMessageBox, false);
+            WindowHelper.CenterOnVisibleOwner(uiMessageBox);
             uiMessageBox.ShowDialogAsync();
 
             // 由于 JsScriptSettingsObject 的存在，这里只能手动再次保存配置
@@ -1867,7 +1846,7 @@ public partial class ScriptControlViewModel : ViewModel
             }
 
             var file = Path.Combine(ScriptGroupPath, $"{scriptGroup.Name}.json");
-            File.WriteAllText(file, scriptGroup.ToJson());
+            scriptGroup.WriteToFileAtomically(file);
         }
         catch (Exception e)
         {
@@ -2194,6 +2173,7 @@ public partial class ScriptControlViewModel : ViewModel
             Owner = Application.Current.MainWindow,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
+        WindowHelper.CenterOnVisibleOwner(uiMessageBox);
 
         var result = await uiMessageBox.ShowDialogAsync();
         if (result == MessageBoxResult.Primary)
@@ -2236,13 +2216,25 @@ public partial class ScriptControlViewModel : ViewModel
 
         if (taskProgress != null)
         {
-            //await StartGroups(selectedGroups);
-            //taskProgress.Next
-            var sg = ScriptGroups.ToList().Where(sg => taskProgress.ScriptGroupNames.Contains(sg.Name)).ToList();
+            if (ScriptGroups.Count == 0)
+            {
+                ReadScriptGroup();
+            }
+
+            var sg = taskProgress.ScriptGroupNames.Count == 0
+                ? ScriptGroups.ToList()
+                : taskProgress.ScriptGroupNames
+                    .Select(name => ScriptGroups.FirstOrDefault(g => g.Name == name))
+                    .OfType<ScriptGroup>()
+                    .ToList();
             TaskProgressManager.GenerNextProjectInfo(taskProgress, sg);
             if (taskProgress.Next == null)
             {
-                _logger.LogWarning("无法定位到下一个要执行的项目：next为空（" + taskProgress.Name + ")");
+                _logger.LogWarning(
+                    "无法定位到下一个要执行的项目：next为空（{Name}，上次组={Group}，上次项目={Project}）",
+                    taskProgress.Name,
+                    taskProgress.LastScriptGroupName,
+                    taskProgress.LastSuccessScriptGroupProjectInfo?.Name);
             }
             else
             {
@@ -2382,6 +2374,7 @@ public partial class ScriptControlViewModel : ViewModel
             Owner = Application.Current.MainWindow,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
+        WindowHelper.CenterOnVisibleOwner(uiMessageBox);
 
         var result = await uiMessageBox.ShowDialogAsync();
         if (result == MessageBoxResult.Primary)

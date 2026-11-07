@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Model.Area;
+using BetterGenshinImpact.GameTask.Runtime;
 using BetterGenshinImpact.Service.Notification.Model;
 using BetterGenshinImpact.Service.Notification.Model.Enum;
 using BetterGenshinImpact.Service.Notifier;
@@ -13,6 +14,8 @@ using BetterGenshinImpact.Service.Notifier.Exception;
 using BetterGenshinImpact.Service.Notifier.Interface;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace BetterGenshinImpact.Service.Notification;
 
@@ -25,6 +28,7 @@ public class NotificationService : IHostedService, IDisposable
     private static NotificationService? _instance;
 
     private readonly NotifierManager _notifierManager;
+    private readonly GameRuntimeService _gameRuntimeService;
     private readonly HttpClient _notifyHttpClient;
     private readonly CancellationTokenSource? _webSocketCts;
 
@@ -34,9 +38,10 @@ public class NotificationService : IHostedService, IDisposable
     /// <summary>
     ///     构造函数
     /// </summary>
-    public NotificationService(NotifierManager notifierManager)
+    public NotificationService(NotifierManager notifierManager, GameRuntimeService gameRuntimeService)
     {
         _notifierManager = notifierManager ?? throw new ArgumentNullException(nameof(notifierManager));
+        _gameRuntimeService = gameRuntimeService;
         _notifyHttpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         _webSocketCts = new CancellationTokenSource();
 
@@ -51,6 +56,8 @@ public class NotificationService : IHostedService, IDisposable
     /// </summary>
     public void Dispose()
     {
+        // 先释放所有通知器（含微信 Clawbot 后台长轮询会话），再释放共享 HttpClient
+        _notifierManager.RemoveAllNotifiers();
         // _webSocketCts?.Cancel();
         _webSocketCts?.Dispose();
         _notifyHttpClient?.Dispose();
@@ -106,8 +113,12 @@ public class NotificationService : IHostedService, IDisposable
         InitializeDingDingNotifier();
         InitializeTelegramNotifier();
         InitializeXxtuiNotifier();
-        InitializeDiscordWebhookNotifier();
+        InitializeDiscordNotifier();
         InitializeServerChanNotifier();
+        InitializeMeowNotifier();
+        InitializeGotifyNotifier();
+        InitializeQqNotifier();
+        InitializeWechatClawbotNotifier();
 
         // 添加新通知渠道时，在此处添加对应的初始化方法调用
     }
@@ -286,11 +297,25 @@ public class NotificationService : IHostedService, IDisposable
     }
 
     /// <summary>
-    ///     初始化 Discord 通知器
+    ///     初始化 Discord 通知器。
+    ///     按配置的 Discord 通知方式二选一注册：Webhook 方式走频道 Webhook 地址，
+    ///     Bot 方式走机器人 Token + 推送目标清单。两者互斥，避免同一条通知被推送两次。
     /// </summary>
-    private void InitializeDiscordWebhookNotifier()
+    private void InitializeDiscordNotifier()
     {
         if (_notificationConfig?.DiscordWebhookNotificationEnabled != true) return;
+
+        if (DiscordNotificationModes.IsBot(_notificationConfig.DiscordNotificationMode))
+        {
+            _notifierManager.RegisterNotifier(new DiscordBotNotifier(
+                _notifyHttpClient,
+                _notificationConfig.DiscordBotToken,
+                _notificationConfig.DiscordBotTargets,
+                _notificationConfig.DiscordBotMessageFormat,
+                _notificationConfig.DiscordWebhookImageEncoder
+            ));
+            return;
+        }
 
         _notifierManager.RegisterNotifier(new DiscordWebhookNotifier(
             _notifyHttpClient,
@@ -312,6 +337,86 @@ public class NotificationService : IHostedService, IDisposable
             _notifyHttpClient,
             _notificationConfig.ServerChanSendKey
         ));
+    }
+
+    /// <summary>
+    /// 初始化 MeoW 通知器
+    /// </summary>
+    private void InitializeMeowNotifier()
+    {
+        if (_notificationConfig?.MeowNotificationEnabled != true) return;
+
+        _notifierManager.RegisterNotifier(new MeowNotifier(
+            _notifyHttpClient,
+            _notificationConfig.MeowNickname,
+            _notificationConfig.MeowTitle
+        ));
+    }
+
+    /// <summary>
+    /// 初始化 Gotify 通知器。
+    /// </summary>
+    private void InitializeGotifyNotifier()
+    {
+        if (_notificationConfig?.GotifyNotificationEnabled != true) return;
+
+        _notifierManager.RegisterNotifier(new GotifyNotifier(
+            _notifyHttpClient,
+            _notificationConfig.GotifyUrl,
+            _notificationConfig.GotifyAppToken,
+            _notificationConfig.GotifyNotifyLevel
+        ));
+    }
+
+    /// <summary>
+    ///     初始化QQ通知器
+    /// </summary>
+    private void InitializeQqNotifier()
+    {
+        if (_notificationConfig?.QqNotificationEnabled != true) return;
+
+        _notifierManager.RegisterNotifier(new QqNotifier(
+            _notifyHttpClient,
+            _notificationConfig.QqAppId,
+            _notificationConfig.QqClientSecret,
+            _notificationConfig.QqOpenId,
+            _notificationConfig.QqGroupOpenId,
+            _notificationConfig.QqMessageFormat
+        ));
+    }
+
+    /// <summary>
+    ///     初始化微信 Clawbot 通知器
+    /// </summary>
+    private void InitializeWechatClawbotNotifier()
+    {
+        if (_notificationConfig?.WechatClawbotNotificationEnabled != true) return;
+
+        // 微信会话状态（context_token / get_updates_buf）跨进程共享同一份 User/WechatClawbot 文件，
+        // 仅主实例（Primary）启动长轮询会话，避免桌面分身等多实例用旧游标并发推进导致令牌互相覆盖。
+        // 子实例仍注册通知器保留发送能力（从共享存储读取最新 context_token）。
+        _notifierManager.RegisterNotifier(new WechatClawbotNotifier(
+            _notifyHttpClient,
+            _notificationConfig,
+            IsPrimaryInstance()
+        ));
+    }
+
+    /// <summary>
+    ///     是否为 BetterGI 主实例（Primary）。桌面分身 / WebView 等子实例不维护微信长轮询会话。
+    /// </summary>
+    private static bool IsPrimaryInstance()
+    {
+        try
+        {
+            var bootstrap = BetterGenshinImpact.Service.Instance.InstanceBootstrap.Current;
+            return bootstrap == null || bootstrap.Context.IsRoot;
+        }
+        catch (System.Exception)
+        {
+            // 无法判断时默认主实例行为，避免在单实例场景误禁用
+            return true;
+        }
     }
 
     /// <summary>
@@ -340,9 +445,48 @@ public class NotificationService : IHostedService, IDisposable
     /// </summary>
     public void RefreshNotifiers()
     {
+        // 批量提交期间抑制刷新，待提交完成后统一刷新一次，避免逐字段触发多次通知器重建
+        if (_suppressRefresh)
+        {
+            _refreshPending = true;
+            return;
+        }
+
         _notificationConfig = TaskContext.Instance().Config.NotificationConfig;
         _notifierManager.RemoveAllNotifiers();
         InitializeNotifiers();
+    }
+
+    /// <summary>
+    ///     是否处于批量提交抑制刷新状态
+    /// </summary>
+    private bool _suppressRefresh;
+
+    /// <summary>
+    ///     抑制期间是否有待刷新的标记
+    /// </summary>
+    private bool _refreshPending;
+
+    /// <summary>
+    ///     批量更新通知配置（如微信 Clawbot 绑定凭证）时抑制逐字段刷新，
+    ///     提交完成后统一刷新一次，保证通知器读到完整的配置集合。
+    /// </summary>
+    public IDisposable SuppressRefreshNotifiers()
+    {
+        _suppressRefresh = true;
+        return new RefreshSuppression(this);
+    }
+
+    private sealed class RefreshSuppression(NotificationService service) : IDisposable
+    {
+        public void Dispose()
+        {
+            service._suppressRefresh = false;
+            service._refreshPending = false;
+            // 绑定是用户主动操作，即使凭证未变化也必须刷新通知器，
+            // 以确保会话从独立存储加载最新的 context_token / get_updates_buf。
+            service.RefreshNotifiers();
+        }
     }
 
     /// <summary>
@@ -350,17 +494,12 @@ public class NotificationService : IHostedService, IDisposable
     /// </summary>
     public async Task<NotificationTestResult> TestNotifierAsync<T>() where T : INotifier
     {
+        var testData = CreateTestNotificationData();
         try
         {
-            var notifier = _notifierManager.GetNotifier<T>();
-            if (notifier == null)
-            {
-                return NotificationTestResult.Error("通知类型未启用");
-            }
-
-            var testData = CreateTestNotificationData();
-            await notifier.SendAsync(testData);
-            return NotificationTestResult.Success();
+            // 测试发送走管理器入口，纳入在途租约计数，避免发送期间释放通知器资源
+            var error = await _notifierManager.SendTestAsync<T>(testData);
+            return error == null ? NotificationTestResult.Success() : NotificationTestResult.Error(error);
         }
         catch (NotifierException ex)
         {
@@ -369,6 +508,11 @@ public class NotificationService : IHostedService, IDisposable
         catch (Exception ex)
         {
             return NotificationTestResult.Error($"测试通知时发生未知错误: {ex.Message}");
+        }
+        finally
+        {
+            testData.Screenshot?.Dispose();
+            testData.Screenshot = null;
         }
     }
 
@@ -388,7 +532,8 @@ public class NotificationService : IHostedService, IDisposable
         {
             try
             {
-                testData.Screenshot = TaskControl.CaptureToRectArea().CacheImage;
+                using var capture = TaskControl.CaptureToRectArea();
+                testData.Screenshot = capture.CacheImage.Clone();
             }
             catch (Exception ex)
             {
@@ -406,16 +551,28 @@ public class NotificationService : IHostedService, IDisposable
     {
         if (notificationData == null) throw new ArgumentNullException(nameof(notificationData));
 
-        if (!ShouldSendNotification(notificationData.Event)) return;
+        if (!ShouldSendNotification(notificationData.Event))
+        {
+            // 订阅关闭时同样需要释放调用方传入的截图，避免长期泄漏
+            notificationData.Screenshot?.Dispose();
+            notificationData.Screenshot = null;
+            return;
+        }
 
         try
         {
-            await AddScreenshotIfNeededAsync(notificationData);
+            AddScreenshotIfNeeded(notificationData);
             await _notifierManager.SendNotificationToAllAsync(notificationData);
         }
         catch (Exception ex)
         {
             TaskControl.Logger.LogError(ex, "发送通知时发生错误");
+        }
+        finally
+        {
+            // 无论截图由调用方传入还是此处补充，发送完成后统一释放并清空引用
+            notificationData.Screenshot?.Dispose();
+            notificationData.Screenshot = null;
         }
     }
 
@@ -432,28 +589,26 @@ public class NotificationService : IHostedService, IDisposable
     /// <summary>
     ///     如果需要，为通知添加截图
     /// </summary>
-    private async Task AddScreenshotIfNeededAsync(BaseNotificationData notificationData)
+    private void AddScreenshotIfNeeded(BaseNotificationData notificationData)
     {
-        if (_notificationConfig?.IncludeScreenShot != true)
+        if (_notificationConfig?.IncludeScreenShot != true || notificationData.Screenshot != null)
         {
             return;
         }
 
         try
         {
-            var mat = TaskControl.CaptureGameImageNoRetry(TaskTriggerDispatcher.GlobalGameCapture);
+            var mat = TaskControl.CaptureGameImageNoRetry(_gameRuntimeService.Current?.Capture);
             if (mat != null)
             {
-                var imageRegion = new ImageRegion(mat, 0, 0);
-                notificationData.Screenshot = imageRegion.CacheImage;
+                using var imageRegion = new ImageRegion(mat, 0, 0);
+                notificationData.Screenshot = imageRegion.CacheImage.Clone();
             }
         }
         catch (Exception ex)
         {
             TaskControl.Logger.LogDebug(ex, "补充通知截图失败");
         }
-
-        await Task.CompletedTask;
     }
 
     /// <summary>

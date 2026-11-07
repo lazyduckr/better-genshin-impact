@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using BetterGenshinImpact.GameTask.AutoDomain;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using Wpf.Ui.Violeta.Controls;
 
@@ -34,16 +35,19 @@ public static class DomainCascadingItems
         ["「纷争」的哲学"] = (3, "「纷争」(3/6)"),
         ["「月光」的哲学"] = (1, "「月光」(1/4)"),
         ["「乐园」的哲学"] = (2, "「乐园」(2/5)"),
-        ["「浪迹」的哲学"] = (3, "「浪迹」(3/6)")
+        ["「浪迹」的哲学"] = (3, "「浪迹」(3/6)"),
+        ["「慈爱」的哲学"] = (1, "「慈爱」(1/4)"),
+        ["「坚忍」的哲学"] = (2, "「坚忍」(2/5)"),
+        ["「荣光」的哲学"] = (3, "「荣光」(3/6)")
     };
 
     private static IReadOnlyList<ICascadingItem> BuildItems()
     {
-        return MapLazyAssets.Instance.CountryToDomains.Keys
+        var items = MapLazyAssets.Get().CountryToDomains.Keys
             .Reverse()
             .Select(country => (ICascadingItem)new CascadingItem(
                 country,
-                MapLazyAssets.Instance.CountryToDomains[country]
+                MapLazyAssets.Get().CountryToDomains[country]
                     .AsEnumerable()
                     .Reverse()
                     .Select(d => (ICascadingItem)new CascadingItem(
@@ -53,6 +57,14 @@ public static class DomainCascadingItems
                     })
             ))
             .ToList();
+        items.Insert(0, new CascadingItem("自动选择", new ICascadingItem[]
+        {
+            new CascadingItem(AutoDomainTask.TrainingGuideOption)
+            {
+                Tag = AutoDomainTask.TrainingGuideOption
+            }
+        }));
+        return items;
     }
 
     private static string FormatRewards(IEnumerable<string> rewards)
